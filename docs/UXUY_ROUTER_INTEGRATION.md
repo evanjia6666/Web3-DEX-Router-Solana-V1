@@ -1,0 +1,151 @@
+# UXUY Solana Router — 集成手册（面向 `uxuyprotocol/dex` Go 侧）
+
+本分支（`uxuy-router`）把 OKX 开源的 DEX Router V1（MIT）裁剪并改造为 uxuy 专属路由合约。
+上游源码：[okxlabs/DEX-Router-Solana-V1](https://github.com/okxlabs/DEX-Router-Solana-V1)（其链上部署体为 `6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma`，附 OKX 审计报告 `audit/` 目录）。
+本合约**只做执行**：询价、路径搜索仍在链下（`dex_offlineQuoteSol` / `dex_offlineSwapSol` 的引擎），合约负责原子执行、逐跳账户校验、余额差结算与 `min_return` 兜底。
+
+## 1. 部署身份（本地生成，主网部署前请评审）
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| Program ID | `AN6zjJfTD5Cpj2x56sWsAod1Jb5viiQH4Xcg3tm5DgNY` | keypair：`target/deploy/uxuy_router-keypair.json`（gitignore 内，务必备份到密钥管理系统） |
+| authority PDA | `5rvVfdVCgSQ9AyTTctN1MPGk5brWVEtvMfPKtcesAuVG` | `PDA(["uxuy_sa"], program_id)`，bump **255**，中间跳代币账户与手续费转账的签名者 |
+| wsol_sa | `G6KLoMzx47Nh1xJLtzyGiFXiwH688Z8LEwHtFv4xBPyj` | authority PDA 的 WSOL ATA（`wrap_unwrap_v3` TOB 模式用） |
+| claim_authority | `J8NpT3tG57ggTbr4ek8qwapG9SeGnTfXmNZn6ncjuRsG` | 允许调用 `claim` 的 uxuy 运营钱包（keypair：`target/deploy/uxuy_claim_authority-keypair.json`） |
+| 种子 | `SEED_SA="uxuy_sa"`、`SEED_TEMP_WSOL="temp_wsol"` | 见 `src/constants.rs` |
+| 临时账户 | `create_token_account_with_seed` | seed 由链下指定（推荐复用 `temp_wsol + 随机数` 模式），owner 为用户、authority 为程序 PDA |
+| 构建产物 | `target/deploy/uxuy_router.so`（约 850 KB，原版 1.9 MB） | `anchor build`；IDL：`target/idl/uxuy_router.json` |
+
+> 注意：换 program keypair 时，`authority_pda`、`BUMP_SA`、`wsol_sa` 三处必须按新 ID 重新推导（`constants.rs`），否则 PDA 签名全部失败。
+
+## 2. 指令集（12 个，与链上 OKX V1 同构）
+
+| 指令 | 用途 | 对应 OKX API 语义 |
+|---|---|---|
+| `swap` | 用户直接签名的基本兑换 | swap |
+| `proxy_swap` | 经由 PDA 托管（SA）账户兑换 | proxy swap |
+| `swap_v3` | 佣金 + 平台费（ToC：佣金可从输入/输出端抽） | feePercent / fromTokenReferrer / toTokenReferrer |
+| `swap_v3_with_cpi_event` | 同上 + CPI event | 事件订阅场景 |
+| `swap_tob_v3` | ToC 佣金 + trim（正滑点抽成）+ 平台费 | positiveSlippagePercent |
+| `swap_tob_v3_with_receiver` | 同上 + 指定收款人（`sol_receiver`，配合 `acc_close_flag` 关户退租、原生 SOL 直付） | swapReceiverAddress + closeAuthorityAddress |
+| `swap_tob_v3_enhanced` | 再加 charge（对报价额抽费） | 白名单功能 |
+| `wrap_unwrap_v3` / `wrap_unwrap_v3_with_receiver` | SOL↔wSOL 互转并抽费 | 兑 SOL 输出的封装 |
+| `create_token_account` / `create_token_account_with_seed` | 创建临时 token 账户（程序可关闭） | 响应中的 createTokenAccountList |
+| `claim` | 运营从 PDA 托管临时账户提残留资金 | — |
+
+## 3. SwapArgs 与 uxuy 路由的映射
+
+```rust
+SwapArgs {
+    amount_in: u64,          // 整单输入
+    expect_amount_out: u64,  // 链下预估产出（>= min_return）
+    min_return: u64,         // 兜底：整条路径余额差 < min_return 则整笔回滚
+    amounts: Vec<u64>,       // 一级拆分：uxuy 目前恒为 [amount_in]
+    routes: Vec<Vec<Route>>, // 每份资金一条多跳路径（<= 3 跳）
+}
+Route { dexes: Vec<Dex>, weights: Vec<u8> }  // 每跳可并行拆分；uxuy 恒为单池 [dex], [100]
+```
+
+uxuy 引擎的路由模型是"单路径、每跳一个最优池、最多 3 跳"，映射规则：
+
+- `amounts = [amount_in]`，`routes = [[Route { dexes: [D_i], weights: [100] } for 每跳 i]]`；
+- `min_return` = 现有 `r.MinAmount`（引擎已按 slippagePercent 算好）；上线 router 后 `haircutIntermediate` 可下线；
+- 约束：`Σamounts == amount_in`、每跳 `Σweights == 100`、`MAX_HOPS = 3`。
+
+## 4. Dex 变体 ↔ uxuy builder 映射 + remaining_accounts 布局
+
+**拼装规则**：各跳账户按顺序首尾相接塞进 `remaining_accounts`（程序内部用 offset 游标逐段消费）；每段的 `swap_source_token` / `swap_destination_token` =
+第一跳用用户源账户 / 最后 一跳用用户目标账户，**中间跳一律用程序 PDA 持有的临时账户**（交易前用 `create_token_account_with_seed` 建好，authority 为 authority PDA）；`swap_authority_pubkey` = authority PDA。
+字段顺序必须与下表完全一致（= `src/adapters/*.rs` 中对应 struct 的字段序）：
+
+
+### RaydiumSwap — Raydium AMM v4 `swapBaseIn`（19 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, token_program, amm_id, amm_authority, amm_open_orders, amm_target_orders, pool_coin_token_account, pool_pc_token_account, serum_program_id, serum_market, serum_bids, serum_asks, serum_event_queue, serum_coin_vault_account, serum_pc_vault_account, serum_vault_signer`
+
+### RaydiumSwapV2 — Raydium AMM v4 精简布局（9 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, token_program, amm_id, amm_authority, pool_coin_token_account, pool_pc_token_account`
+
+### RaydiumCpmmSwap — Raydium CPMM `swapBaseInput`（14 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, authority, amm_config, pool_state, input_vault, output_vault, input_token_program, output_token_program, input_token_mint, output_token_mint, observation_state`
+
+### RaydiumClmmSwap — Raydium CLMM `swap`（14 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, amm_config_id, pool_id, input_vault, output_vault, observation_id, tick_array0, ex_bitmap, tick_array1, tick_array2, token_program`
+
+### RaydiumClmmSwapV2 — Raydium CLMM `swapV2`（18 账户，Token-2022 兼容）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, amm_config_id, pool_id, input_vault, output_vault, observation_id, token_program, token_program_2022, memo_program, input_vault_mint, output_vault_mint, ex_bitmap, tick_array0, tick_array1, tick_array2`
+
+### Whirlpool — Orca Whirlpool `swap`（12 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, token_program, whirlpool, token_vault_a, token_vault_b, tick_array0, tick_array1, tick_array2, oracle`
+
+### WhirlpoolV2 — Orca Whirlpool `swapV2`（16 账户，Token-2022 兼容）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, token_program_a, token_program_b, memo_program, whirlpool, token_mint_a, token_mint_b, token_vault_a, token_vault_b, tick_array0, tick_array1, tick_array2, oracle`
+
+### PancakeSwapV3Swap — PancakeSwap CLMM `swap`（14 账户，Raydium 布局分支）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, amm_config, pool_state, input_vault, output_vault, observation_state, token_program, tick_array0, ex_bitmap, tick_array1, tick_array2`
+
+### PancakeSwapV3SwapV2 — PancakeSwap CLMM `swapV2`（18 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, amm_config, pool_state, input_vault, output_vault, observation_state, token_program, token_program_2022, memo_program, input_vault_mint, output_vault_mint, ex_bitmap, tick_array0, tick_array1, tick_array2`
+
+### MeteoraDlmm — Meteora DLMM `swap`（18 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, lb_pair, bin_array_bitmap_extension, reserve_x, reserve_y, token_x_mint, token_y_mint, oracle, host_fee_in, token_x_program, token_y_program, event_authority, bin_array0, bin_array1, bin_array2`
+
+### MeteoraDlmmSwap2 — Meteora DLMM `swap2`（19 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, lb_pair, bin_array_bitmap_extension, reserve_x, reserve_y, token_x_mint, token_y_mint, oracle, host_fee_in, token_x_program, token_y_program, memo_program, event_authority, bin_array0, bin_array1, bin_array2`
+
+### PumpfunammBuy3 — PumpSwap `buy_exact_quote_in`（23 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, pool, global_config, base_mint, quote_mint, pool_base_token_account, pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account, base_token_program, quote_token_program, system_program, associated_token_program, event_authority, coin_creator_vault_ata, coin_creator_vault_authority, global_volume_accumulator, user_volume_accumulator, fee_config, fee_program`
+
+### PumpfunammSell3 — PumpSwap `sell`（21 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, pool, global_config, base_mint, quote_mint, pool_base_token_account, pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account, base_token_program, quote_token_program, system_program, associated_token_program, event_authority, coin_creator_vault_ata, coin_creator_vault_authority, fee_config, fee_program`
+
+### ByrealClmm — Byreal `swap_v3_dyn`（24 账户，含 payer）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, payer, amm_config, pool_state, input_token_account, output_token_account, input_vault, output_vault, observation_state, token_program, token_program_2022, memo_program, input_vault_mint, output_vault_mint, tickarray_bitmap_extension, tick_array0..tick_array5`
+
+### ByrealClmm2 — Byreal 新布局（21 账户）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, amm_config, pool_state, input_vault, output_vault, observation_state, token_program, token_program_2022, memo_program, input_vault_mint, output_vault_mint, tickarray_bitmap_extension, tick_array0..tick_array5`
+
+
+uxuy Go 侧 `swapper/sol/instr/build.go` 的 builder 与上表的对应关系：
+`buildWhirlpoolSwap`→`WhirlpoolV2`、Raydium CLMM `swapV2`→`RaydiumClmmSwapV2`、Pancake `swapV2`→`PancakeSwapV3SwapV2`、
+`swapBaseInput`→`RaydiumCpmmSwap`、DLMM `swap2`→`MeteoraDlmmSwap2`、Raydium v4 `swapBaseIn`→`RaydiumSwap`/`RaydiumSwapV2`、
+PumpSwap `buy_exact_quote_in`/`sell`→`PumpfunammBuy3`/`PumpfunammSell3`、Byreal `swap_v3_dyn`→`ByrealClmm`（或新池 `ByrealClmm2`）。
+builder 里已有的账户布局知识与上表同源，改造成"去掉用户侧 token 账户、换 PDA 临时账户、按段拼接"即可。
+
+## 5. commission_info 位布局（u32）
+
+| 位 | 含义 |
+|---|---|
+| bit 31 | `commission_direction`：1=从输入端抽佣，0=从输出端 |
+| bit 30 | `acc_close_flag`：目标临时账户成交后关闭（配合 `sol_receiver` 退租+直付原生 SOL） |
+| bit 29..0 | `commission_rate`（万分比，上限 10%） |
+
+`swap_tob_v3*` 的 `trim_rate`（u8，千分比，上限 100=10%）：对**正滑点部分**抽成；`platform_fee_rate`（u16，万分比）。
+
+## 6. 复刻目标交易的模式（SOL 输出 + 指定接收人 + 正滑点归集）
+
+参照链上样本 `5PCjTpXz...kxPa`（OKX V2 `create_token_account` + `swap_tob_with_receiver`），用本合约等价实现：
+
+1. `ComputeBudget`×2（CU 上限 + 优先费）；
+2. System transfer：feePayer 垫付临时账户租金（2,039,280 lamports/账户）；
+3. `create_token_account_with_seed`：建带 close authority 的 wSOL 临时账户；
+4. `swap_tob_v3_with_receiver(args, commission_info=1<<30, trim_rate=100, platform_fee_rate, order_id, sol_receiver=Some(rx))`：
+   - `trim_rate=100` 把正滑点全部归集到 platform fee 账户；`acc_close_flag=true` 关闭临时账户、租金连同 wSOL 一起换原生 SOL 转给 `rx`；
+   - 末尾 `min_return` 余额差校验，不达标整笔回滚。
+
+## 7. 部署与运维
+
+```bash
+anchor build                 # 产物 target/deploy/uxuy_router.so + target/idl/uxuy_router.json
+anchor deploy --provider.cluster devnet   # 先 devnet 全 DEX 矩阵 e2e
+anchor deploy --provider.cluster mainnet  # upgrade authority 建议用 Squads 多签
+```
+
+- 交易组装保持 v1-only（SIMD-0385）可行（单条 router 指令账户数大幅下降）；ALT 作为二期优化；
+- `simulate:true` 闸门照旧保留，验收标准 = simulate 的 token balance 变化与旧纯指令路径逐字段对拍；
+- 上线顺序建议：devnet e2e → mainnet 小额灰度（按 API key）→ 全量；
+- 本仓库相对上游的变更（裁剪 50 个 adapter、换 seed/ID、地址模块改为 `from_str_const`）属于审计增量范围，主网前补一轮审计。
+
+## 8. 与 OKX V2 的差异（为什么保持 V1 模型）
+
+V2（`proVF4...`）把 `min_return` 改为链上由 `expect_amount_out × slippage` 推导、路由扁平化（`weight` u16 bps + `index`）、增加 TokenLedger/RFQ 验签。
+uxuy 当前为 exactIn + AMM 池报价，V1 模型 1:1 够用且实现更简单；后续若接 RFQ 流动性，可参照 `sol_rfq` adapter（上游）补验签腿。

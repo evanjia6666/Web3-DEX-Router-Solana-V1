@@ -1,9 +1,21 @@
-# DEX Router Solana V1
+# UXUY DEX Router (Solana)
 
 [![Anchor Version](https://img.shields.io/badge/Anchor-0.31.1-blue.svg)](https://www.anchor-lang.com/)
 [![Solana Version](https://img.shields.io/badge/Solana-2.1.21-purple.svg)](https://solana.com/)
 
-This repository contains the core smart contracts for the Dex Router on Solana Blockchain. The router enables efficient token swaps across multiple liquidity sources and protocols through a unified interface.
+**`uxuy-router` 分支**：基于 OKX 开源 DEX Router V1（MIT）裁剪改造的 uxuy 专属路由合约，
+服务 `uxuyprotocol/dex` 的 Solana 离线询价（`dex_offlineSwapSol`）——链下引擎负责询价与路径搜索，
+本合约负责原子执行、逐跳账户校验、余额差结算与 `min_return` 兜底。
+
+- Program：`programs/uxuy-router`（18 个 Dex 变体：Raydium v4/CPMM/CLMM、Orca Whirlpool、PancakeSwap CLMM、Meteora DLMM、PumpSwap、Byreal）
+- 集成手册（含账户布局表、Go 侧映射、部署流程）：[docs/UXUY_ROUTER_INTEGRATION.md](docs/UXUY_ROUTER_INTEGRATION.md)
+- 上游源码与审计报告：[okxlabs/DEX-Router-Solana-V1](https://github.com/okxlabs/DEX-Router-Solana-V1)（`audit/` 目录、`main` 分支保持原样）
+
+---
+
+以下为上游原始 README：
+
+# DEX Router Solana V1
 
 ## 🚀 Key Features
 

@@ -12,14 +12,10 @@ pub use constants::*;
 pub use instructions::*;
 pub use processor::*;
 
-#[cfg(feature = "staging")]
-declare_id!("preZmu827KVPCoQ4LYwSoec13x6seQrKA3QpjgDtx1R");
-
-#[cfg(not(feature = "staging"))]
-declare_id!("6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma");
+declare_id!("AN6zjJfTD5Cpj2x56sWsAod1Jb5viiQH4Xcg3tm5DgNY");
 
 #[program]
-pub mod dex_solana {
+pub mod uxuy_router {
     use super::*;
 
     #[cfg_attr(feature = "log-metrics", dex_macros::log_metrics)]
