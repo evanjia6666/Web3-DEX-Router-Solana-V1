@@ -10,7 +10,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::Instruction;
 use anchor_spl::token_interface::TokenAccount;
 use arrayref::array_ref;
-const ARGS_LEN: usize = 24;
+const ARGS_LEN: usize = 25;
 pub struct PumpfunammSellAccounts3<'info> {
     pub dex_program_id: &'info AccountInfo<'info>,
     pub swap_authority_pubkey: &'info AccountInfo<'info>,
@@ -372,6 +372,10 @@ pub fn buy3<'a>(
     data.extend_from_slice(BUY_EXACT_QUOTE_IN_SELECTOR);
     data.extend_from_slice(&amount_in.to_le_bytes()); // spendable_quote_in
     data.extend_from_slice(&1u64.to_le_bytes()); // min_base_amount_out
+    // track_volume: OptionBool { true } — pump_amm added this arg after the
+    // upstream snapshot; without the byte the on-chain borsh deserialization
+    // of buy_exact_quote_in fails (verified against the live IDL, 2026-10)
+    data.extend_from_slice(&1u8.to_le_bytes());
 
     let mut accounts = Vec::with_capacity(23);
     accounts.push(AccountMeta::new(swap_accounts.pool.key(), false));

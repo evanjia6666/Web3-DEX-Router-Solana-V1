@@ -24,9 +24,6 @@ pub enum Dex {
     PancakeSwapV3SwapV2,
     MeteoraDlmm,
     MeteoraDlmmSwap2,
-    PumpfunammBuy,
-    PumpfunammSell,
-    PumpfunammBuy2,
     PumpfunammBuy3,
     PumpfunammSell3,
     ByrealClmm,
@@ -528,9 +525,6 @@ fn distribute_swap<'a>(
         Dex::PancakeSwapV3SwapV2 => pancake_swap_v3::swap_v2,
         Dex::MeteoraDlmm => meteora::dlmm_swap,
         Dex::MeteoraDlmmSwap2 => meteora::dlmm_swap2,
-        Dex::PumpfunammBuy => pumpfunamm::buy,
-        Dex::PumpfunammSell => pumpfunamm::sell,
-        Dex::PumpfunammBuy2 => pumpfunamm::buy2,
         Dex::PumpfunammBuy3 => {
             return pumpfunamm::buy3(
                 remaining_accounts,

@@ -92,7 +92,7 @@ uxuy 引擎的路由模型是"单路径、每跳一个最优池、最多 3 跳"�
 ### MeteoraDlmmSwap2 — Meteora DLMM `swap2`（19 账户）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, lb_pair, bin_array_bitmap_extension, reserve_x, reserve_y, token_x_mint, token_y_mint, oracle, host_fee_in, token_x_program, token_y_program, memo_program, event_authority, bin_array0, bin_array1, bin_array2`
 
-### PumpfunammBuy3 — PumpSwap `buy_exact_quote_in`（23 账户）
+### PumpfunammBuy3 — PumpSwap `buy_exact_quote_in`（23 账户，含 `track_volume=OptionBool{true}` 尾字节）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, pool, global_config, base_mint, quote_mint, pool_base_token_account, pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account, base_token_program, quote_token_program, system_program, associated_token_program, event_authority, coin_creator_vault_ata, coin_creator_vault_authority, global_volume_accumulator, user_volume_accumulator, fee_config, fee_program`
 
 ### PumpfunammSell3 — PumpSwap `sell`（21 账户）
@@ -108,7 +108,7 @@ uxuy 引擎的路由模型是"单路径、每跳一个最优池、最多 3 跳"�
 uxuy Go 侧 `swapper/sol/instr/build.go` 的 builder 与上表的对应关系：
 `buildWhirlpoolSwap`→`WhirlpoolV2`、Raydium CLMM `swapV2`→`RaydiumClmmSwapV2`、Pancake `swapV2`→`PancakeSwapV3SwapV2`、
 `swapBaseInput`→`RaydiumCpmmSwap`、DLMM `swap2`→`MeteoraDlmmSwap2`、Raydium v4 `swapBaseIn`→`RaydiumSwap`/`RaydiumSwapV2`、
-PumpSwap `buy_exact_quote_in`/`sell`→`PumpfunammBuy3`/`PumpfunammSell3`、Byreal `swap_v3_dyn`→`ByrealClmm`（或新池 `ByrealClmm2`）。
+PumpSwap `buy_exact_quote_in`/`sell`→`PumpfunammBuy3`/`PumpfunammSell3`（上游的 Buy/Sell/Buy2 旧布局对当前 pump_amm 程序已失效，已在枚举中移除）、Byreal `swap_v3_dyn`→`ByrealClmm`（或新池 `ByrealClmm2`）。
 builder 里已有的账户布局知识与上表同源，改造成"去掉用户侧 token 账户、换 PDA 临时账户、按段拼接"即可。
 
 ## 5. commission_info 位布局（u32）
@@ -149,3 +149,26 @@ anchor deploy --provider.cluster mainnet  # upgrade authority 建议用 Squads �
 
 V2（`proVF4...`）把 `min_return` 改为链上由 `expect_amount_out × slippage` 推导、路由扁平化（`weight` u16 bps + `index`）、增加 TokenLedger/RFQ 验签。
 uxuy 当前为 exactIn + AMM 池报价，V1 模型 1:1 够用且实现更简单；后续若接 RFQ 流动性，可参照 `sol_rfq` adapter（上游）补验签腿。
+
+## 9. Adapter ↔ 链上 IDL 验证记录（2026-10-10）
+
+方法：`anchor idl fetch` 拉取各 DEX 程序链上现役 IDL（Whirlpool/Pancake/Meteora DLMM/PumpSwap/Byreal），
+Raydium v4/CPMM/CLMM 无链上 IDL 账户，改用 `uxuyprotocol/solanaswap` 生成包（`defi/*/idl.json`、`discriminators.go`、`instructions.go`，由真实主网交易驱动维护）作对照源；
+逐指令比对三要素：discriminator/selector、参数编码（字节数与字段序）、CPI 账户序。
+
+| Dex 变体 | 目标指令 | selector/参数 | 账户序 | 结论 |
+|---|---|---|---|---|
+| RaydiumSwap | AMM v4 `swapBaseIn`(tag 9) | ✅ 18B 数据 | ✅ 18 账户 | 一致 |
+| RaydiumCpmmSwap | `swap_base_input` | ✅ disc `8fbe5adac41e33de` 与 solanaswap 一致，2 args | ✅ 13 账户 | 一致 |
+| RaydiumClmmSwap | `swap` | ✅ 41B = 4 args（u64,u64,u128,bool） | ✅ 10 核心 + bitmap/3 ticks 尾部 | 一致 |
+| RaydiumClmmSwapV2 | `swapV2` | ✅ 4 args，与 solanaswap builder 逐字段一致 | ✅ 13 核心 + bitmap/ticks 尾部 | 一致 |
+| Whirlpool | `swap` | ✅ 42B = 5 args | ✅ 12 账户 | 一致 |
+| WhirlpoolV2 | `swapV2` | ✅ 43B（含 remaining_accounts_info=None 尾字节） | ✅ 16 账户 | 一致 |
+| PancakeSwapV3SwapV2 | `swap_v2` | ✅ 4 args | ✅ 13 核心 + 尾部 | 一致 |
+| MeteoraDlmm | `swap` | ✅ 2 args | ✅ 15 核心 + bins 尾部 | 一致 |
+| MeteoraDlmmSwap2 | `swap2` | ✅ 3 args（含空 RemainingAccountsInfo 4×0x00） | ✅ 16 核心 + bins 尾部 | 一致 |
+| PumpfunammBuy3 | `buy_exact_quote_in` | ⚠️→✅ 链上已加第 3 参数 `track_volume: OptionBool`，上游快照缺这 1 字节 → **本分支已补 `0x01`** | ✅ 23 账户 | 已修复 |
+| PumpfunammSell3 | `sell` | ✅ 2 args | ✅ 21 账户 | 一致 |
+| ByrealClmm / ByrealClmm2 | `swap_v2` | ✅ 4 args | ✅ 13 核心 + bitmap + 6 ticks | 一致（程序另有 `swap_v3_dyn`，`swap_v2` 仍在） |
+
+维护提醒：DEX 程序升级后此表需复核；PumpSwap 这类快速迭代的程序是重点盯防对象（本次唯一漂移即来自它）。
