@@ -98,10 +98,10 @@ uxuy 引擎的路由模型是"单路径、每跳一个最优池、最多 3 跳"�
 ### PumpfunammSell3 — PumpSwap `sell`（21 账户）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, pool, global_config, base_mint, quote_mint, pool_base_token_account, pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account, base_token_program, quote_token_program, system_program, associated_token_program, event_authority, coin_creator_vault_ata, coin_creator_vault_authority, fee_config, fee_program`
 
-### ByrealClmm — Byreal `swap_v3_dyn`（24 账户，含 payer）
+### ByrealClmm — Byreal `swap_v2`（24 账户，含 payer；程序另有 `swap_v3_dyn`，动态费池仅接受后者）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, payer, amm_config, pool_state, input_token_account, output_token_account, input_vault, output_vault, observation_state, token_program, token_program_2022, memo_program, input_vault_mint, output_vault_mint, tickarray_bitmap_extension, tick_array0..tick_array5`
 
-### ByrealClmm2 — Byreal 新布局（21 账户）
+### ByrealClmm2 — Byreal `swap_v2` 新布局（21 账户；同样不适用于动态费池）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, amm_config, pool_state, input_vault, output_vault, observation_state, token_program, token_program_2022, memo_program, input_vault_mint, output_vault_mint, tickarray_bitmap_extension, tick_array0..tick_array5`
 
 
@@ -172,3 +172,7 @@ Raydium v4/CPMM/CLMM 无链上 IDL 账户，改用 `uxuyprotocol/solanaswap` 生
 | ByrealClmm / ByrealClmm2 | `swap_v2` | ✅ 4 args | ✅ 13 核心 + bitmap + 6 ticks | 一致（程序另有 `swap_v3_dyn`，`swap_v2` 仍在） |
 
 维护提醒：DEX 程序升级后此表需复核；PumpSwap 这类快速迭代的程序是重点盯防对象（本次唯一漂移即来自它）。
+
+**Go 侧路由现状（2026-10-10，uxuyprotocol/dex @ uxuy-router）**：上表是合约 adapter 与链上 IDL 的对齐结论；Go 引擎目前仅将 Whirlpool/RaydiumCLMM/Pancake/CPMM/DLMM/RaydiumV2 六个变体路由上链——PumpSwap（链上程序现要求尾部 buyback 账户，合约 adapter 未携带）与 Byreal（动态费池拒绝 `swap_v2`，需要 `swap_v3_dyn`+稀疏 tick+pyth）虽在合约枚举中，仍走旧纯指令路径，待合约 adapter 补齐后放行。
+
+**临时账户创建方式**：中间跳账户由 Go 侧直接用 `System.CreateAccountWithSeed`（base=用户钱包）+ `InitializeAccount3(owner=authority PDA)` 创建——`InitializeAccount3` 的 owner 只是参数、无需程序签名；合约的 `create_token_account(_with_seed)` 指令硬约束 wSOL mint（见其 `token_mint` 约束），通用 mint 走不了，两者并存各有用途。
