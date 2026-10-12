@@ -514,7 +514,13 @@ fn distribute_swap<'a>(
     payer: Option<&AccountInfo<'a>>,
 ) -> Result<u64> {
     let swap_function = match dex {
-        Dex::RaydiumSwap => raydium::swap,
+        // legacy tag-9 layout: the 2026-09 post-serum program revision of the
+        // AMM v4 program no longer accepts it (serum slots collapsed — see the
+        // Go side's pinned live wire). Ordinal stays reserved (enum order is
+        // frozen on-chain); reaching it is always a caller-side bug.
+        Dex::RaydiumSwap => {
+            return Err(ErrorCode::DeprecatedDex.into());
+        }
         Dex::RaydiumSwapV2 => raydium::swap_v2,
         Dex::RaydiumCpmmSwap => raydium::swap_cpmm,
         Dex::RaydiumClmmSwap => raydium::swap_clmm,

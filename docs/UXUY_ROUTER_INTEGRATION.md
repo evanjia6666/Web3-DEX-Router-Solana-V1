@@ -176,3 +176,11 @@ Raydium v4/CPMM/CLMM 无链上 IDL 账户，改用 `uxuyprotocol/solanaswap` 生
 **Go 侧路由现状（2026-10-10，uxuyprotocol/dex @ uxuy-router）**：上表是合约 adapter 与链上 IDL 的对齐结论；Go 引擎目前仅将 Whirlpool/RaydiumCLMM/Pancake/CPMM/DLMM/RaydiumV2 六个变体路由上链——PumpSwap（链上程序现要求尾部 buyback 账户，合约 adapter 未携带）与 Byreal（动态费池拒绝 `swap_v2`，需要 `swap_v3_dyn`+稀疏 tick+pyth）虽在合约枚举中，仍走旧纯指令路径，待合约 adapter 补齐后放行。
 
 **临时账户创建方式**：中间跳账户由 Go 侧直接用 `System.CreateAccountWithSeed`（base=用户钱包）+ `InitializeAccount3(owner=authority PDA)` 创建——`InitializeAccount3` 的 owner 只是参数、无需程序签名；合约的 `create_token_account(_with_seed)` 指令硬约束 wSOL mint（见其 `token_mint` 约束），通用 mint 走不了，两者并存各有用途。
+
+## 10. 合约侧补丁待办（需主网部署后 simulate 验证）
+
+**PumpSwap 尾部账户（优先级高，流量大头）**。链上 pump_amm 现在拒绝不带尾部账户的 buy/sell：`[pool_v2（仅 coin_creator 已设时，readonly）] + [buyback_fee_recipient（readonly）] + [buyback_fee_recipient 的 quote-mint ATA（writable）]`（布局证据：dex 仓库 `instr/pumpswap.go` 的 `pumpTrailingAccounts` + 官方 SDK 1.20 wire）。补丁方案：`PumpfunammBuyAccounts3/SellAccounts3` 各加 3 个尾槽（`pool_v2` 未用时传 ZERO_ADDRESS，adapter 跳过零地址不追加 CPI meta——需主网 simulate 验证"多余槽位被拒/零地址可跳过"哪条成立，或改为 Go 侧按 pool 元数据精确给 2/3 个并让 ACCOUNTS_LEN 常量同步 +2/+3 两套变体）；Go 侧 `routerPrograms` 放行即恢复 PumpSwap 路由。
+
+**Byreal `swap_v3_dyn`（按流量占比决定）**。动态费池对 `swap_v2` 报 6048 SwapDynamicFeeEnabled；`swap_v3_dyn` disc `e52ed584692828e4`，13 核心账户 + 尾部 `[bitmap(readonly), 4 个存在性探测的稀疏 tick array（writable, 按行走方向）, dyn-fee 池再追 token0/token1 pyth oracle（readonly）]`（dex 仓库 `instr/byreal.go` 全部现成）。补丁要点：变体拆 `ByrealClmm3Dyn`（尾部追加式枚举，序号 15 起），tick 段长度可变——需要 Go 侧按探测结果拼段 + adapter 按剩余账户里非零地址消费。
+
+两项共同前置：主网部署（第一优先）→ `simulate:true` 逐字段对拍通过后合入。

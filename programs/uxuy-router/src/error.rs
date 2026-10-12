@@ -247,4 +247,7 @@ pub enum ErrorCode {
 
     #[msg("System program is none")]
     SystemProgramIsNone,
+
+    #[msg("Deprecated dex variant")]
+    DeprecatedDex,
 }
