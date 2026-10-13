@@ -237,10 +237,11 @@ fn validate_sol_receiver_and_flags<'info>(
     }
 }
 
+/// SPL Token CloseAccount instruction tag (spl-token pack: `Self::CloseAccount => buf.push(9)`).
+const SPL_TOKEN_CLOSE_ACCOUNT: u8 = 9;
+
 /// ToB swap handler with optional specified receiver
 /// Supports both normal swaps and wSOL -> SOL conversion with custom receiver
-/// SPL Token CloseAccount instruction tag.
-const SPL_TOKEN_CLOSE_ACCOUNT: u8 = 51;
 
 pub fn swap_tob_specified_receiver_handler<'a>(
     ctx: Context<'_, '_, 'a, 'a, CommissionProxySwapAccountsV3WithReceiver<'a>>,
