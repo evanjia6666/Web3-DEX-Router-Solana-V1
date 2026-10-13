@@ -22,9 +22,8 @@ pub mod uxuy_router {
     pub fn swap<'a>(
         ctx: Context<'_, '_, 'a, 'a, SwapAccounts<'a>>,
         data: SwapArgs,
-        order_id: u64,
     ) -> Result<()> {
-        instructions::swap_handler(ctx, data, order_id)
+        instructions::swap_handler(ctx, data)
     }
 
     // ******************** Proxy Swap ******************** //
@@ -32,9 +31,8 @@ pub mod uxuy_router {
     pub fn proxy_swap<'a>(
         ctx: Context<'_, '_, 'a, 'a, ProxySwapAccounts<'a>>,
         data: SwapArgs,
-        order_id: u64,
     ) -> Result<()> {
-        instructions::proxy_swap_handler(ctx, data, order_id)
+        instructions::proxy_swap_handler(ctx, data)
     }
 
     // ******************** Swap V3 ******************** //
@@ -44,13 +42,11 @@ pub mod uxuy_router {
         args: SwapArgs,
         commission_info: u32,
         platform_fee_rate: u16,
-        order_id: u64,
     ) -> Result<()> {
         instructions::swap_toc_handler(
             ctx,
             args,
             commission_info,
-            order_id,
             Some(platform_fee_rate),
         )
     }
@@ -61,13 +57,11 @@ pub mod uxuy_router {
         args: SwapArgs,
         commission_info: u32,
         platform_fee_rate: u16,
-        order_id: u64,
     ) -> Result<()> {
         instructions::swap_toc_with_cpi_event_handler(
             ctx,
             args,
             commission_info,
-            order_id,
             Some(platform_fee_rate),
         )
     }
@@ -79,13 +73,11 @@ pub mod uxuy_router {
         commission_info: u32,
         trim_rate: u8,
         platform_fee_rate: u16,
-        order_id: u64,
     ) -> Result<()> {
         instructions::swap_tob_handler(
             ctx,
             args,
             commission_info,
-            order_id,
             Some(trim_rate),
             Some(platform_fee_rate),
         )
@@ -101,13 +93,11 @@ pub mod uxuy_router {
         commission_info: u32,
         trim_rate: u8,
         platform_fee_rate: u16,
-        order_id: u64,
     ) -> Result<()> {
         instructions::swap_tob_specified_receiver_handler(
             ctx,
             args,
             commission_info,
-            order_id,
             Some(trim_rate),
             Some(platform_fee_rate),
         )
@@ -121,13 +111,11 @@ pub mod uxuy_router {
         trim_rate: u8,
         charge_rate: u16,
         platform_fee_rate: u16,
-        order_id: u64,
     ) -> Result<()> {
         instructions::swap_tob_enhanced_handler(
             ctx,
             args,
             commission_info,
-            order_id,
             trim_rate,
             charge_rate,
             Some(platform_fee_rate),

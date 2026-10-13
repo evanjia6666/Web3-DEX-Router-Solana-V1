@@ -43,13 +43,25 @@ pub struct Route {
     pub weights: Vec<u8>,
 }
 
+/// V2-form swap arguments, matching the OKX router wire: the slippage bound
+/// rides the args (basis points) and min_return is DERIVED on-chain from
+/// expect_amount_out x (1 - slippage) instead of being passed explicitly.
 #[derive(AnchorDeserialize, AnchorSerialize, Clone)]
 pub struct SwapArgs {
+    pub order_id: u64,
     pub amount_in: u64,
     pub expect_amount_out: u64,
-    pub min_return: u64,
-    pub amounts: Vec<u64>,       // 1st level split amount
-    pub routes: Vec<Vec<Route>>, // 2nd level split route
+    pub slippage: u16, // basis points, < 10000
+    pub routes: Vec<Vec<Route>>,
+}
+
+impl SwapArgs {
+    pub fn min_return(&self) -> u64 {
+        self.expect_amount_out
+            .checked_mul(10_000u64.saturating_sub(self.slippage as u64))
+            .expect("expect_amount_out overflow")
+            / 10_000
+    }
 }
 
 #[event]
@@ -87,13 +99,12 @@ pub fn common_swap<'info, T: CommonSwapProcessor<'info>>(
     system_program: &Option<Program<'info, System>>,
     remaining_accounts: &'info [AccountInfo<'info>],
     args: SwapArgs,
-    order_id: u64,
     fee_rate: Option<u32>,
     fee_direction: Option<bool>,
     fee_token_account: Option<&InterfaceAccount<'info, TokenAccount>>,
 ) -> Result<u64> {
     log_swap_basic_info(
-        order_id,
+        args.order_id,
         &source_mint.key(),
         &destination_mint.key(),
         &source_token_account.owner,
@@ -102,7 +113,7 @@ pub fn common_swap<'info, T: CommonSwapProcessor<'info>>(
 
     let before_source_balance = source_token_account.amount;
     let before_destination_balance = destination_token_account.amount;
-    let min_return = args.min_return;
+    let min_return = args.min_return();
 
     log_swap_balance_before(
         before_source_balance,
@@ -157,7 +168,6 @@ pub fn common_swap<'info, T: CommonSwapProcessor<'info>>(
         remaining_accounts,
         args,
         actual_amount_in,
-        order_id,
         source_token_sa.is_some(),
         owner_seeds,
         Some(payer),
@@ -222,7 +232,6 @@ pub fn common_swap_v3<'info, T: PlatformFeeV3Processor<'info>>(
     system_program: &Option<Program<'info, System>>,
     remaining_accounts: &'info [AccountInfo<'info>],
     args: SwapArgs,
-    order_id: u64,
     // COMMISSION
     commission_rate: u32,
     commission_direction: bool,
@@ -238,7 +247,7 @@ pub fn common_swap_v3<'info, T: PlatformFeeV3Processor<'info>>(
     acc_close_flag: bool,
 ) -> Result<(u64, u64, u64, u64)> {
     log_swap_basic_info(
-        order_id,
+        args.order_id,
         &source_mint.key(),
         &destination_mint.key(),
         &source_token_account.owner,
@@ -247,7 +256,7 @@ pub fn common_swap_v3<'info, T: PlatformFeeV3Processor<'info>>(
 
     let before_source_balance = source_token_account.amount;
     let before_destination_balance = destination_token_account.amount;
-    let min_return = args.min_return;
+    let min_return = args.min_return();
 
     log_swap_balance_before(
         before_source_balance,
@@ -306,7 +315,6 @@ pub fn common_swap_v3<'info, T: PlatformFeeV3Processor<'info>>(
         remaining_accounts,
         args,
         actual_amount_in,
-        order_id,
         source_token_sa.is_some(),
         None,
         Some(payer),
@@ -385,7 +393,6 @@ fn execute_swap<'info>(
     remaining_accounts: &'info [AccountInfo<'info>],
     args: SwapArgs,
     actual_amount_in: u64,
-    order_id: u64,
     proxy_from: bool,
     owner_seeds: Option<&[&[&[u8]]]>,
     payer: Option<&AccountInfo<'info>>,
@@ -393,24 +400,20 @@ fn execute_swap<'info>(
     destination_account.reload()?;
     let before_destination_balance = destination_account.amount;
 
-    // Check SwapArgs
-    let SwapArgs { amount_in: _, min_return, expect_amount_out, amounts, routes } = &args;
+    // Check SwapArgs (min_return derived on-chain: expect x (1 - slippage))
+    let SwapArgs { amount_in: _, expect_amount_out, slippage, routes, .. } = &args;
     require!(actual_amount_in > 0, ErrorCode::AmountInMustBeGreaterThanZero);
-    // min_return can be 0 to support 100% slippage tolerance
-    require!(*expect_amount_out >= *min_return, ErrorCode::InvalidExpectAmountOut);
-    require!(amounts.len() == routes.len(), ErrorCode::AmountsAndRoutesMustHaveTheSameLength);
-
-    let total_amounts: u64 = amounts
-        .iter()
-        .try_fold(0u64, |acc, &x| acc.checked_add(x).ok_or(ErrorCode::CalculationError))?;
-    require!(total_amounts == actual_amount_in, ErrorCode::TotalAmountsMustBeEqualToAmountIn);
+    require!(*slippage < 10_000, ErrorCode::InvalidExpectAmountOut);
+    require!(*expect_amount_out >= args.min_return(), ErrorCode::InvalidExpectAmountOut);
+    require!(routes.len() == 1, ErrorCode::AmountsAndRoutesMustHaveTheSameLength); // single-path model
+    let _ = actual_amount_in;
 
     // Swap by Routes
     let mut offset: usize = 0;
     // Level 1 split handling
     for (i, hops) in routes.iter().enumerate() {
         require!(hops.len() <= MAX_HOPS, ErrorCode::TooManyHops);
-        let mut amount_in = amounts[i];
+        let mut amount_in = actual_amount_in; // single-path: the whole amount rides routes[0]
 
         // Multi-hop handling
         let mut last_to_account = ZERO_ADDRESS;
@@ -456,7 +459,6 @@ fn execute_swap<'info>(
                     &mut hop_accounts,
                     hop,
                     proxy_from,
-                    order_id,
                     owner_seeds,
                     payer,
                 )?;
@@ -509,7 +511,6 @@ fn distribute_swap<'a>(
     hop_accounts: &mut HopAccounts,
     hop: usize,
     proxy_from: bool,
-    _order_id: u64,
     owner_seeds: Option<&[&[&[u8]]]>,
     payer: Option<&AccountInfo<'a>>,
 ) -> Result<u64> {

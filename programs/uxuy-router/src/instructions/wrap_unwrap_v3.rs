@@ -119,11 +119,11 @@ pub fn platform_fee_wrap_unwrap_handler_v3<'a>(
 
     // Log initial state and get balances
     log_wrap_unwrap_initial_info(
+        order_id,
         &ctx.accounts.payer,
         &ctx.accounts.payer_wsol_account,
         commission_info.wrap_direction,
         amount_in,
-        order_id,
     )?;
 
     // Calculate fees
@@ -277,11 +277,11 @@ pub fn get_wrap_unwrap_mints(wrap_direction: bool) -> (Pubkey, Pubkey) {
 
 /// Log wrap/unwrap initial information
 fn log_wrap_unwrap_initial_info<'info>(
+    order_id: u64,
     payer: &Signer<'info>,
     payer_wsol_account: &InterfaceAccount<'info, TokenAccount>,
     wrap_direction: bool,
     amount_in: u64,
-    order_id: u64,
 ) -> Result<(Pubkey, Pubkey, u64, u64)> {
     let (source_mint, destination_mint) = get_wrap_unwrap_mints(wrap_direction);
 
@@ -313,13 +313,13 @@ fn log_wrap_unwrap_initial_info<'info>(
 /// - destination owner: receiver owner (wrap: token account owner, unwrap: receiver pubkey)
 /// - destination balance: receiver balance (wrap: WSOL amount, unwrap: lamports)
 fn log_wrap_unwrap_initial_info_with_receiver<'info>(
+    order_id: u64,
     payer: &Signer<'info>,
     payer_wsol_account: &InterfaceAccount<'info, TokenAccount>,
     receiver: &AccountInfo<'info>,
     receiver_owner: &Pubkey,
     wrap_direction: bool,
     amount_in: u64,
-    order_id: u64,
 ) -> Result<(Pubkey, Pubkey, u64, u64)> {
     let (source_mint, destination_mint) = get_wrap_unwrap_mints(wrap_direction);
 
@@ -893,13 +893,13 @@ pub fn platform_fee_wrap_unwrap_handler_v3_with_receiver<'a>(
 
     // Log initial state and get balances
     log_wrap_unwrap_initial_info_with_receiver(
+        order_id,
         &ctx.accounts.payer,
         &ctx.accounts.payer_wsol_account,
         &ctx.accounts.receiver,
         &receiver_owner,
         commission_info.wrap_direction,
         amount_in,
-        order_id,
     )?;
 
     // Calculate fees

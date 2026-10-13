@@ -6,6 +6,7 @@ members = [
 
 [profile.release]
 overflow-checks = true
+opt-level = "s"
 lto = "fat"
 codegen-units = 1
 [profile.release.build-override]

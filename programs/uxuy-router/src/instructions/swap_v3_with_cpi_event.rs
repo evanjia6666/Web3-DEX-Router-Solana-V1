@@ -59,7 +59,6 @@ pub fn swap_toc_with_cpi_event_handler<'a>(
     ctx: Context<'_, '_, 'a, 'a, SwapAccountsV3WithCpiEvent<'a>>,
     args: SwapArgs,
     commission_info: u32,
-    order_id: u64,
     platform_fee_rate: Option<u16>,
 ) -> Result<()> {
     let amount_in = args.amount_in;
@@ -73,6 +72,7 @@ pub fn swap_toc_with_cpi_event_handler<'a>(
     // Log fee accounts info
     log_fee_accounts_info(&ctx.accounts.commission_account, &ctx.accounts.platform_fee_account);
 
+    let order_id = args.order_id;
     let (source_token_change, destination_token_change, commission_amount, platform_fee_amount) =
         common_swap_v3(
             &SwapToCProcessor,
@@ -90,7 +90,6 @@ pub fn swap_toc_with_cpi_event_handler<'a>(
             &ctx.accounts.system_program,
             ctx.remaining_accounts,
             args,
-            order_id,
             commission_rate,
             commission_direction,
             &ctx.accounts.commission_account,
@@ -102,6 +101,7 @@ pub fn swap_toc_with_cpi_event_handler<'a>(
             None,
             false,
         )?;
+
 
     let key_or_default =
         |acc: &Option<AccountInfo<'a>>| acc.as_ref().map(|a| a.key()).unwrap_or(Pubkey::default());

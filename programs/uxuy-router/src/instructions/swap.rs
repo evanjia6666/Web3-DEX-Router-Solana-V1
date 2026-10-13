@@ -29,7 +29,6 @@ pub struct SwapAccounts<'info> {
 pub fn swap_handler<'a>(
     ctx: Context<'_, '_, 'a, 'a, SwapAccounts<'a>>,
     args: SwapArgs,
-    order_id: u64,
 ) -> Result<()> {
     common_swap(
         &SwapProcessor,
@@ -49,7 +48,6 @@ pub fn swap_handler<'a>(
         &None,
         ctx.remaining_accounts,
         args,
-        order_id,
         None,
         None,
         None,

@@ -1,7 +1,8 @@
 use super::{SwapArgs, common_swap_v3};
 use crate::error::ErrorCode;
 use crate::processor::*;
-use crate::utils::transfer_sol_with_rent_exemption;
+use crate::SA_AUTHORITY_SEED;
+
 use crate::utils::*;
 use crate::wsol_program;
 use anchor_lang::prelude::*;
@@ -60,7 +61,6 @@ pub fn swap_tob_handler<'a>(
     ctx: Context<'_, '_, 'a, 'a, CommissionProxySwapAccountsV3<'a>>,
     args: SwapArgs,
     commission_info: u32,
-    order_id: u64,
     trim_rate: Option<u8>,
     platform_fee_rate: Option<u16>,
 ) -> Result<()> {
@@ -96,7 +96,6 @@ pub fn swap_tob_handler<'a>(
         &ctx.accounts.system_program,
         ctx.remaining_accounts,
         args,
-        order_id,
         commission_rate,
         commission_direction,
         &ctx.accounts.commission_account,
@@ -115,7 +114,6 @@ pub fn swap_toc_handler<'a>(
     ctx: Context<'_, '_, 'a, 'a, CommissionProxySwapAccountsV3<'a>>,
     args: SwapArgs,
     commission_info: u32,
-    order_id: u64,
     platform_fee_rate: Option<u16>,
 ) -> Result<()> {
     let commission_direction = commission_info >> 31 == 1;
@@ -141,7 +139,6 @@ pub fn swap_toc_handler<'a>(
         &ctx.accounts.system_program,
         ctx.remaining_accounts,
         args,
-        order_id,
         commission_rate,
         commission_direction,
         &ctx.accounts.commission_account,
@@ -246,7 +243,6 @@ pub fn swap_tob_specified_receiver_handler<'a>(
     ctx: Context<'_, '_, 'a, 'a, CommissionProxySwapAccountsV3WithReceiver<'a>>,
     args: SwapArgs,
     commission_info: u32,
-    order_id: u64,
     trim_rate: Option<u8>,
     platform_fee_rate: Option<u16>,
 ) -> Result<()> {
@@ -293,7 +289,6 @@ pub fn swap_tob_specified_receiver_handler<'a>(
         &ctx.accounts.system_program,
         ctx.remaining_accounts,
         args,
-        order_id,
         commission_rate,
         commission_direction,
         &ctx.accounts.commission_account,
@@ -306,16 +301,50 @@ pub fn swap_tob_specified_receiver_handler<'a>(
         acc_close_flag,
     )?;
 
-    // Transfer SOL to specified receiver if applicable
+    // Deliver native SOL to the specified receiver with OKX-V2 semantics
+    // (audited on the reference transaction): the receiver gets EXACTLY the
+    // swap output; the destination temp account's rent returns to the payer.
+    // The destination must be the router-custody temp account (authority PDA
+    // owned, created via create_token_account_with_seed): close it to the
+    // payer (rent + wrapped balance back), then transfer the output amount
+    // from the payer — a tx signer — to the receiver.
     if let Some(sol_receiver) = &ctx.accounts.sol_receiver {
-        // Only transfer if acc_close_flag is true (already validated)
-        // and destination was wSOL (already validated)
         if acc_close_flag && actual_amount_out > 0 {
-            transfer_sol_with_rent_exemption(
-                &ctx.accounts.payer,
-                sol_receiver,
+            let destination = ctx.accounts.destination_token_account.to_account_info();
+            let payer_info = ctx.accounts.payer.to_account_info();
+            let authority_info = ctx
+                .accounts
+                .sa_authority
+                .as_ref()
+                .ok_or(ErrorCode::InvalidSaAuthority)?
+                .to_account_info();
+
+            // token CloseAccount (tag 51): [account(w), destination(payer, w),
+            // authority(ro, PDA signs via invoke_signed)]
+            let close_ix = anchor_lang::solana_program::instruction::Instruction {
+                program_id: crate::token_program::ID,
+                accounts: vec![
+                    AccountMeta::new(destination.key(), false),
+                    AccountMeta::new(payer_info.key(), false),
+                    AccountMeta::new_readonly(authority_info.key(), false),
+                ],
+                data: vec![51],
+            };
+            anchor_lang::solana_program::program::invoke_signed(
+                &close_ix,
+                &[destination.clone(), payer_info.clone(), authority_info.clone()],
+                SA_AUTHORITY_SEED,
+            )?;
+
+            // output: payer (signer) -> receiver
+            let transfer_ix = anchor_lang::solana_program::system_instruction::transfer(
+                &payer_info.key(),
+                &sol_receiver.key(),
                 actual_amount_out,
-                None, // No seeds needed for payer
+            );
+            anchor_lang::solana_program::program::invoke(
+                &transfer_ix,
+                &[payer_info.clone(), sol_receiver.to_account_info()],
             )?;
         }
     }
@@ -327,7 +356,6 @@ pub fn swap_tob_enhanced_handler<'a>(
     ctx: Context<'_, '_, 'a, 'a, CommissionProxySwapAccountsV3<'a>>,
     args: SwapArgs,
     commission_info: u32,
-    order_id: u64,
     trim_rate: u8,
     charge_rate: u16,
     platform_fee_rate: Option<u16>,
@@ -364,7 +392,6 @@ pub fn swap_tob_enhanced_handler<'a>(
         &ctx.accounts.system_program,
         ctx.remaining_accounts,
         args,
-        order_id,
         commission_rate,
         commission_direction,
         &ctx.accounts.commission_account,

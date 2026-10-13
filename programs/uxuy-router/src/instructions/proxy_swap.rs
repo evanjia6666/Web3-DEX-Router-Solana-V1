@@ -52,7 +52,6 @@ pub struct ProxySwapAccounts<'info> {
 pub fn proxy_swap_handler<'a>(
     ctx: Context<'_, '_, 'a, 'a, ProxySwapAccounts<'a>>,
     args: SwapArgs,
-    order_id: u64,
 ) -> Result<()> {
     common_swap(
         &ProxySwapProcessor,
@@ -72,7 +71,6 @@ pub fn proxy_swap_handler<'a>(
         &ctx.accounts.system_program,
         ctx.remaining_accounts,
         args,
-        order_id,
         None,
         None,
         None,
