@@ -130,7 +130,7 @@ builder 里已有的账户布局知识与上表同源，改造成"去掉用户�
 3. `create_token_account_with_seed`：建带 close authority 的 wSOL 临时账户；
 4. `swap_tob_v3_with_receiver(args, commission_info, trim_rate, platform_fee_rate, sol_receiver=Some(rx))`（order_id 已并入 args）：
    - `acc_close_flag=true` 时 `destination_token_program` 槽必须传真实 SPL Token 程序（ProgramID 填充=Option::None，收尾 close 处报 6050 `DestinationTokenProgramIsNone`）；
-   - 收尾资金流（对拍 5PCjTpXz 的 lamport 审计）：关闭临时账户，**租金退回 feePayer（A）**，实际产出以原生 SOL 转给 `rx` —— 接收人恰好拿产出，不含租金；
+   - 收尾资金流（对拍 5PCjTpXz 的 lamport 审计）：关闭临时账户，**租金退回 feePayer（A）**，实际产出以原生 SOL 转给 `rx` —— 接收人拿产出、不含租金（边界：低于租金豁免线的接收地址会被 `transfer_sol_with_rent_exemption` 补足到豁免线，补足由付款人出）；
    - 末尾 `min_return` 余额差校验（min_return 由 args.slippage 链上推导），不达标整笔回滚。
 
 ## 7. 部署与运维
