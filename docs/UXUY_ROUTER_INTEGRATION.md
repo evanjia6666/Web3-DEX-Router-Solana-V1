@@ -128,9 +128,10 @@ builder 里已有的账户布局知识与上表同源，改造成"去掉用户�
 1. `ComputeBudget`×2（CU 上限 + 优先费）；
 2. System transfer：feePayer 垫付临时账户租金（2,039,280 lamports/账户）；
 3. `create_token_account_with_seed`：建带 close authority 的 wSOL 临时账户；
-4. `swap_tob_v3_with_receiver(args, commission_info=1<<30, trim_rate=100, platform_fee_rate, order_id, sol_receiver=Some(rx))`：
-   - `trim_rate=100` 把正滑点全部归集到 platform fee 账户；`acc_close_flag=true` 关闭临时账户、租金连同 wSOL 一起换原生 SOL 转给 `rx`；
-   - 末尾 `min_return` 余额差校验，不达标整笔回滚。
+4. `swap_tob_v3_with_receiver(args, commission_info, trim_rate, platform_fee_rate, sol_receiver=Some(rx))`（order_id 已并入 args）：
+   - `acc_close_flag=true` 时 `destination_token_program` 槽必须传真实 SPL Token 程序（ProgramID 填充=Option::None，收尾 close 处报 6050 `DestinationTokenProgramIsNone`）；
+   - 收尾资金流（对拍 5PCjTpXz 的 lamport 审计）：关闭临时账户，**租金退回 feePayer（A）**，实际产出以原生 SOL 转给 `rx` —— 接收人恰好拿产出，不含租金；
+   - 末尾 `min_return` 余额差校验（min_return 由 args.slippage 链上推导），不达标整笔回滚。
 
 ## 7. 部署与运维
 

@@ -1,9 +1,11 @@
 use super::{SwapArgs, common_swap_v3};
 use crate::error::ErrorCode;
 use crate::processor::*;
-use crate::SA_AUTHORITY_SEED;
 
-use crate::utils::{log_fee_accounts_info, log_rate_info_v3, log_rate_info_v3_enhanced};
+use crate::utils::{
+    log_fee_accounts_info, log_rate_info_v3, log_rate_info_v3_enhanced,
+    transfer_sol_with_rent_exemption,
+};
 use crate::wsol_program;
 use anchor_lang::prelude::*;
 use anchor_spl::{
@@ -237,9 +239,6 @@ fn validate_sol_receiver_and_flags<'info>(
     }
 }
 
-/// SPL Token CloseAccount instruction tag (spl-token pack: `Self::CloseAccount => buf.push(9)`).
-const SPL_TOKEN_CLOSE_ACCOUNT: u8 = 9;
-
 /// ToB swap handler with optional specified receiver
 /// Supports both normal swaps and wSOL -> SOL conversion with custom receiver
 
@@ -305,50 +304,20 @@ pub fn swap_tob_specified_receiver_handler<'a>(
         acc_close_flag,
     )?;
 
-    // Deliver native SOL to the specified receiver with OKX-V2 semantics
-    // (audited on the reference transaction): the receiver gets EXACTLY the
-    // swap output; the destination temp account's rent returns to the payer.
-    // The destination must be the router-custody temp account (authority PDA
-    // owned, created via create_token_account_with_seed): close it to the
-    // payer (rent + wrapped balance back), then transfer the output amount
-    // from the payer — a tx signer — to the receiver.
+    // Deliver native SOL to the specified receiver. The temp wSOL account is
+    // ALREADY closed inside common_swap_v3's after_swap tail (rent + wrapped
+    // balance swept to the payer — original V1 behavior; needs
+    // destination_token_program = Some); pay the receiver EXACTLY the swap
+    // output from the now-refunded payer. Rent stays with the payer (A),
+    // matching the audited OKX-V2 semantics. Do NOT close again here — a
+    // second CloseAccount on the wiped account always fails.
     if let Some(sol_receiver) = &ctx.accounts.sol_receiver {
         if acc_close_flag && actual_amount_out > 0 {
-            let destination = ctx.accounts.destination_token_account.to_account_info();
-            let payer_info = ctx.accounts.payer.to_account_info();
-            let authority_info = ctx
-                .accounts
-                .sa_authority
-                .as_ref()
-                .ok_or(ErrorCode::InvalidSaAuthority)?
-                .to_account_info();
-
-            // token CloseAccount (tag 51): [account(w), destination(payer, w),
-            // authority(ro, PDA signs via invoke_signed)]
-            let close_ix = anchor_lang::solana_program::instruction::Instruction {
-                program_id: crate::token_program::ID,
-                accounts: vec![
-                    AccountMeta::new(destination.key(), false),
-                    AccountMeta::new(payer_info.key(), false),
-                    AccountMeta::new_readonly(authority_info.key(), false),
-                ],
-                data: vec![SPL_TOKEN_CLOSE_ACCOUNT],
-            };
-            anchor_lang::solana_program::program::invoke_signed(
-                &close_ix,
-                &[destination.clone(), payer_info.clone(), authority_info.clone()],
-                SA_AUTHORITY_SEED,
-            )?;
-
-            // output: payer (signer) -> receiver
-            let transfer_ix = anchor_lang::solana_program::system_instruction::transfer(
-                &payer_info.key(),
-                &sol_receiver.key(),
+            transfer_sol_with_rent_exemption(
+                &ctx.accounts.payer,
+                sol_receiver,
                 actual_amount_out,
-            );
-            anchor_lang::solana_program::program::invoke(
-                &transfer_ix,
-                &[payer_info.clone(), sol_receiver.to_account_info()],
+                None,
             )?;
         }
     }
