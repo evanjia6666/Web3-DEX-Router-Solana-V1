@@ -75,15 +75,19 @@
   simulate/unsignedTransaction 输出处按「legacy 超限时切 v1（或全量 v1）」接入，
   响应的 `transactionVersion` 字段相应置位；提交端需 `maxSupportedTransactionVersion`。
 
-### 第二步：中间跳改全局托管账户（合约小改 + Go）— 解决租金滞留
-- 合约：现有 `create_token_account` 已能在 PDA 下建户；新增（或复用）一条
-  `init_sa(mint)` 初始化 per-mint 托管账户（确定性 PDA `[sa, mint]`，owner=authority PDA），
-  swap 腿的 src/dst 允许指向托管账户（before_check 的 PDA authority 校验已满足）。
-- Go：中间跳 src/dst = 对应 mint 的托管账户；开头把 amount_in 划入首个托管账户、
-  末尾把产出划到 destination（若 destination=托管账户同 mint 则直通）。
-  租金一次付清；余额差校验天然成立。
-- **风险**：成为托管方（合规/安全审计必须先行）；先仅对中间 mint 启用（wSOL/主流
-  稳定币），边缘 mint 保持现行 per-tx 临时账户。
+### 第二步：中间跳改全局托管账户 — 已实现并主网验证（dex `4fe9955`），零合约改动
+- 落地形态：托管账户 = `CreateWithSeed(ops钱包, "uxuysa-"+sha256(mint)[:8], SPL Token)`，
+  SPL owner = authority PDA（InitializeAccount3 指定，无需签名）。**合约完全不用改**：
+  现行中间账户本就是 authority PDA 持有，`before_check` 的 PDA authority 校验天然满足，
+  余额差记账对既有余额成立，逐笔净流量为零（进出精确金额）。
+- Go：`router.SetCustodyAccount(mint, addr)` 启动时注入热表；compose 命中即用托管
+  账户（省两条建户指令），冷门 mint 自动回退现行每笔临时账户。预热工具：
+  `e2e -mode warm-custody`（ops 签名，一次性 ~0.002 SOL/mint）。
+- 主网实证（公共 RPC，v1 交易）：USDT 托管 `9ZMzDQZt…`（预热 sig `5GWC3V5w…`）后，
+  2-hop receiver 链 6→4 条指令 / 1345 字节，**A 净成本从 −2,044,280（中间租金+费）
+  降为 −5,000（纯手续费）**；receiver 恰得产出不变。
+- 与 V2 差异：我们的托管地址派生自 ops 钱包而非程序 PDA（省一次合约升级）；
+  资金语义相同（共享通道账户、净流量零、不关闭）。
 
 ### 第三步：能力对齐（可选，按业务需要；返佣明确不做）
 - ~~`commission_rates: Vec`~~（**不做**，业务决策 2026-10-13）；
