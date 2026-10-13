@@ -35,6 +35,13 @@ pub const SWAP_SELECTOR: &[u8; 8] = &[248, 198, 158, 145, 225, 117, 135, 200];
 pub const SWAP2_SELECTOR: &[u8; 8] = &[65, 75, 63, 76, 235, 91, 91, 136];
 pub const CPSWAP_SELECTOR: &[u8; 8] = &[143, 190, 90, 218, 196, 30, 51, 222];
 pub const SWAP_V2_SELECTOR: &[u8; 8] = &[43, 4, 237, 11, 26, 201, 30, 98];
+// byreal swap_v3_dyn (e52ed584692828e4): same args as swap_v2 (amount u64,
+// other_amount_threshold u64, sqrt_price_limit_x64 u128, is_base_input u8);
+// falls back to swap_v2 semantics on non-dynamic-fee pools, so it is safe
+// to emit unconditionally — dynamic-fee pools reject plain swap_v2 with
+// 6048 SwapDynamicFeeEnabled. Trailing: bitmap, ≤4 walk tick arrays, and
+// the pyth oracle pair on dynamic-fee pools.
+pub const SWAP_V3_DYN_SELECTOR: &[u8; 8] = &[229, 46, 213, 132, 105, 40, 40, 228];
 pub const SWAP_EXACT_IN_SELECTOR: &[u8; 8] = &[104, 104, 131, 86, 161, 189, 180, 216];
 pub const PLACE_TAKE_ORDER_SELECTOR: &[u8; 8] = &[3, 44, 71, 3, 26, 199, 203, 85];
 pub const BRIDGE_TO_LOG_SELECTOR: &[u8; 8] = &[212, 189, 176, 218, 196, 135, 64, 122];

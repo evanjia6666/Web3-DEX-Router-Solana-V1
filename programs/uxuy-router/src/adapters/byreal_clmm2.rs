@@ -1,6 +1,6 @@
 use crate::adapters::common::{before_check, invoke_process};
 use crate::error::ErrorCode;
-use crate::{HopAccounts, SWAP_V2_SELECTOR, byreal_clmm_program};
+use crate::{HopAccounts, SWAP_V3_DYN_SELECTOR, byreal_clmm_program};
 use anchor_lang::{prelude::*, solana_program::instruction::Instruction};
 use anchor_spl::token_interface::TokenAccount;
 use arrayref::array_ref;
@@ -31,8 +31,10 @@ pub struct ByrealClmmSwapV2Accounts<'info> {
     pub tick_array1: &'info AccountInfo<'info>,
     pub tick_array2: &'info AccountInfo<'info>,
     pub tick_array3: &'info AccountInfo<'info>,
-    pub tick_array4: &'info AccountInfo<'info>,
-    pub tick_array5: &'info AccountInfo<'info>,
+    // dynamic-fee pools: the pyth push-oracle pair in pool-account order
+    // [token0, token1]; unused slots carry the dex program id (skipped)
+    pub oracle0: &'info AccountInfo<'info>,
+    pub oracle1: &'info AccountInfo<'info>,
 }
 
 const ACCOUNTS_LEN: usize = 21;
@@ -59,8 +61,8 @@ impl<'info> ByrealClmmSwapV2Accounts<'info> {
             tick_array1,
             tick_array2,
             tick_array3,
-            tick_array4,
-            tick_array5,
+            oracle0,
+            oracle1,
         ]: &[AccountInfo; ACCOUNTS_LEN] = array_ref![accounts, offset, ACCOUNTS_LEN];
 
         Ok(Self {
@@ -83,8 +85,8 @@ impl<'info> ByrealClmmSwapV2Accounts<'info> {
             tick_array1,
             tick_array2,
             tick_array3,
-            tick_array4,
-            tick_array5,
+            oracle0,
+            oracle1,
         })
     }
 }
@@ -98,7 +100,7 @@ pub fn swap_v2<'a>(
     proxy_swap: bool,
     owner_seeds: Option<&[&[&[u8]]]>,
 ) -> Result<u64> {
-    msg!("Dex::ByrealClmm amount_in: {}, offset: {}", amount_in, offset);
+    msg!("Dex::ByrealClmm2 amount_in: {}, offset: {}", amount_in, offset);
     require!(remaining_accounts.len() >= *offset + ACCOUNTS_LEN, ErrorCode::InvalidAccountsLength);
     let mut swap_accounts = ByrealClmmSwapV2Accounts::parse_accounts(remaining_accounts, *offset)?;
     if swap_accounts.dex_program_id.key != &byreal_clmm_program::id() {
@@ -133,7 +135,7 @@ pub fn swap_v2<'a>(
     accounts.push(AccountMeta::new_readonly(swap_accounts.memo_program.key(), false));
     accounts.push(AccountMeta::new_readonly(swap_accounts.input_vault_mint.key(), false));
     accounts.push(AccountMeta::new_readonly(swap_accounts.output_vault_mint.key(), false));
-    accounts.push(AccountMeta::new(swap_accounts.tickarray_bitmap_extension.key(), false));
+    accounts.push(AccountMeta::new_readonly(swap_accounts.tickarray_bitmap_extension.key(), false));
 
     let mut account_infos = arrayvec::ArrayVec::<_, 20>::new();
     account_infos.push(swap_accounts.swap_authority_pubkey.to_account_info());
@@ -151,6 +153,7 @@ pub fn swap_v2<'a>(
     account_infos.push(swap_accounts.output_vault_mint.to_account_info());
     account_infos.push(swap_accounts.tickarray_bitmap_extension.to_account_info());
 
+    // sparse walk tick arrays (writable), dex-program-id slots skipped
     if swap_accounts.tick_array0.key != &byreal_clmm_program::id() {
         accounts.push(AccountMeta::new(swap_accounts.tick_array0.key(), false));
         account_infos.push(swap_accounts.tick_array0.to_account_info());
@@ -171,18 +174,21 @@ pub fn swap_v2<'a>(
         account_infos.push(swap_accounts.tick_array3.to_account_info());
     }
 
-    if swap_accounts.tick_array4.key != &byreal_clmm_program::id() {
-        accounts.push(AccountMeta::new(swap_accounts.tick_array4.key(), false));
-        account_infos.push(swap_accounts.tick_array4.to_account_info());
+    // dynamic-fee pools: pyth oracle pair (readonly), dex-program-id skipped
+    if swap_accounts.oracle0.key != &byreal_clmm_program::id() {
+        accounts.push(AccountMeta::new_readonly(swap_accounts.oracle0.key(), false));
+        account_infos.push(swap_accounts.oracle0.to_account_info());
     }
 
-    if swap_accounts.tick_array5.key != &byreal_clmm_program::id() {
-        accounts.push(AccountMeta::new(swap_accounts.tick_array5.key(), false));
-        account_infos.push(swap_accounts.tick_array5.to_account_info());
+    if swap_accounts.oracle1.key != &byreal_clmm_program::id() {
+        accounts.push(AccountMeta::new_readonly(swap_accounts.oracle1.key(), false));
+        account_infos.push(swap_accounts.oracle1.to_account_info());
     }
 
+    // swap_v3_dyn: identical args to swap_v2; falls back to swap_v2
+    // semantics on non-dynamic-fee pools (dyn pools reject swap_v2: 6048)
     let mut data = vec![0u8; ARGS_LEN];
-    data[0..8].copy_from_slice(&SWAP_V2_SELECTOR[..]);
+    data[0..8].copy_from_slice(&SWAP_V3_DYN_SELECTOR[..]);
     data[8..16].copy_from_slice(&amount_in.to_le_bytes()); // amount
     data[16..24].copy_from_slice(&1u64.to_le_bytes()); // other_amount_threshold
     data[24..40].copy_from_slice(&0u128.to_le_bytes()); // sqrt_price_limit_x64
