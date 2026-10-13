@@ -178,10 +178,10 @@ Raydium v4/CPMM/CLMM 无链上 IDL 账户，改用 `uxuyprotocol/solanaswap` 生
 
 **临时账户创建方式**：中间跳账户由 Go 侧直接用 `System.CreateAccountWithSeed`（base=用户钱包）+ `InitializeAccount3(owner=authority PDA)` 创建——`InitializeAccount3` 的 owner 只是参数、无需程序签名；合约的 `create_token_account(_with_seed)` 指令硬约束 wSOL mint（见其 `token_mint` 约束），通用 mint 走不了，两者并存各有用途。
 
-## 10. 合约侧补丁待办（需主网部署后 simulate 验证）
+## 10. PumpSwap 尾部账户与 Byreal swap_v3_dyn —— 已实现并主网验证（2026-10-13）
 
 **PumpSwap 尾部账户（优先级高，流量大头）**。链上 pump_amm 现在拒绝不带尾部账户的 buy/sell：`[pool_v2（仅 coin_creator 已设时，readonly）] + [buyback_fee_recipient（readonly）] + [buyback_fee_recipient 的 quote-mint ATA（writable）]`（布局证据：dex 仓库 `instr/pumpswap.go` 的 `pumpTrailingAccounts` + 官方 SDK 1.20 wire）。补丁方案：`PumpfunammBuyAccounts3/SellAccounts3` 各加 3 个尾槽（`pool_v2` 未用时传 ZERO_ADDRESS，adapter 跳过零地址不追加 CPI meta——需主网 simulate 验证"多余槽位被拒/零地址可跳过"哪条成立，或改为 Go 侧按 pool 元数据精确给 2/3 个并让 ACCOUNTS_LEN 常量同步 +2/+3 两套变体）；Go 侧 `routerPrograms` 放行即恢复 PumpSwap 路由。
 
 **Byreal `swap_v3_dyn`（按流量占比决定）**。动态费池对 `swap_v2` 报 6048 SwapDynamicFeeEnabled；`swap_v3_dyn` disc `e52ed584692828e4`，13 核心账户 + 尾部 `[bitmap(readonly), 4 个存在性探测的稀疏 tick array（writable, 按行走方向）, dyn-fee 池再追 token0/token1 pyth oracle（readonly）]`（dex 仓库 `instr/byreal.go` 全部现成）。补丁要点：变体拆 `ByrealClmm3Dyn`（尾部追加式枚举，序号 15 起），tick 段长度可变——需要 Go 侧按探测结果拼段 + adapter 按剩余账户里非零地址消费。
 
-两项共同前置：主网部署（第一优先）→ `simulate:true` 逐字段对拍通过后合入。
+**已上线**：合约 `de71a19`（两网，.so 659,760B）+ dex `94a9989`。主网 simulate 三形态全绿：byreal 动态费（9GTj99…，pyth oracle 对）、byreal 标准费（87pbGHxi… wSOL/Bybit 深池，原生 SOL 入含 wrap+sync）、pump buy（12x41vhk…，尾部三件套、pool_v2 占位跳过）。实现要点：段与适配器槽位一一对应（适配器复用段槽 [0] 作为 CPI 程序 ID meta，段核心 19 槽，多插一个程序 ID 槽会整体错位）；buy 的 `global_volume_accumulator` 必须 WRITABLE（适配器 CPI 要求，legacy 直调时 readonly 能过是因为权限检查发生在 CPI 边界）；creator-set 泵池当前主网 40/40 全为 T2022 base，被 MintsAllSPL 闸门排除，pool_v2 实槽路径按构造覆盖。
