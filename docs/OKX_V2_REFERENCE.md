@@ -54,17 +54,26 @@
 绝对量）。代价：路由器成为事实上的资金托管方（巨额沉淀 + 安全边界），需配套
 审计/多签/风险准备金。
 
-## 4. 我们 fork 的采纳路线（建议分三步，均为可选）
+## 4. 我们 fork 的采纳路线（2026-10-13 修订：Transaction v1 取代 ALT）
 
-### 第一步：ALT 化（Go 侧，不动合约）— 解决 1232B 上限
-- 建「全局热表」：程序（router + 6 个可执行 DEX + Token/Token2022/ATA/System/Memo/
-  ComputeBudget/Sysvar-ix/Rent）+ wSOL/USDC/USDT mint + authority PDA +（若做第二步）
-  托管账户；
-- 建「池子表」：每条路由的 pool/vault/tick array 打表（懒创建、LRU 淘汰，注意 ALT
-  冻结语义：追加地址不可逆，满表需新表轮换）；
-- compose 输出 v0 消息 + `addressTableLookups`；quote 响应的 unsignedTransaction 相应
-  升级（需支持 `maxSupportedTransactionVersion:0` 的提交端）。
-- 预期：2-hop receiver ≤ ~700B，5-hop ≤ ~1.1KB。
+> **修订原因**：SIMD-0385「Transaction v1（更大交易）」已于 **2026-09-15** 随
+> Agave 4.2.2 在主网激活：包上限 **1232 → 4096 字节**（base64 提交通道），内联
+> compute 配置，**不支持也不需要 ALT**（64 个内联地址 ≈2KB 已富余；SIMD-0596 草案
+> 提至 96）。我们的 2-hop receiver 链序列化后 1499 字节——**v1 直接放下，无需任何
+> ALT 基础设施**（实测：公共主网 RPC simulate 绿灯 + 资金流断言通过，见 dex 仓
+> e2e TXV1 模式，commit 309456a）。OKX 抽样仍全用 v0+ALT 是其钱包兼容选择。
+> ALT 降级为「消费端不支持 v1 时」的兼容备选。
+
+### 第一步（已验证）：超大链改发 Transaction v1 — 解决尺寸上限
+- v1 要点：签名移到尾部、版本字节在首位（0x81）；compute 预算（CU limit、优先费
+  总额、loaded-accounts-data、heap）移入消息头配置位；**ComputeBudget 指令变为
+  空操作**（仍烧 150 CU/条，v1 下不要再发）；账户列表去重要求更严格。
+- 两个实测坑：① v1 的 loaded-accounts-data 默认上限低于 legacy，必须显式
+  `WithLoadedAccountsDataSizeLimit(64MiB)`，否则 `MaxLoadedAccountsDataSizeExceeded`；
+  ② 提交须 base64 编码（base58 通道仍限 1232）。
+- Go：solana-go v1.23.0 原生支持（`TransactionV1Config`）；dex 侧在服务端组装/
+  simulate/unsignedTransaction 输出处按「legacy 超限时切 v1（或全量 v1）」接入，
+  响应的 `transactionVersion` 字段相应置位；提交端需 `maxSupportedTransactionVersion`。
 
 ### 第二步：中间跳改全局托管账户（合约小改 + Go）— 解决租金滞留
 - 合约：现有 `create_token_account` 已能在 PDA 下建户；新增（或复用）一条
@@ -76,18 +85,20 @@
 - **风险**：成为托管方（合规/安全审计必须先行）；先仅对中间 mint 启用（wSOL/主流
   稳定币），边缘 mint 保持现行 per-tx 临时账户。
 
-### 第三步：能力对齐（可选，按业务需要）
-- `commission_rates: Vec`（多佣金账户）；`output_native_sol` 指令内标志；
+### 第三步：能力对齐（可选，按业务需要；返佣明确不做）
+- ~~`commission_rates: Vec`~~（**不做**，业务决策 2026-10-13）；
+  `output_native_sol` 指令内标志；
   TokenLedger（`Sysvar1nstructions` 读前置指令产出，支持多 router 指令组合）；
-  DEX 扩容（GoonFi/Manifest/… 按 trafic 排序）。
+  DEX 扩容（GoonFi/Manifest/… 按 traffic 排序）。
 - 我们的 V1 合约骨架（两级路由、余额差、SwapArgs V2 形态）与 V2 同构，
   上述均为增量。
 
 ## 5. 与当前状态的映射
 
 - 当前：合约 `c80268b`（主网+devnet），dex `8c646f3`；1-hop receiver 已主网
-  simulate 绿灯（receiver 恰得产出 / A 仅付手续费）。
-- 第一步（ALT）是 2-hop 上线的**硬前提**；第二步替代「合约逐跳关户」方案
+  simulate 绿灯（receiver 恰得产出 / A 仅付手续费）；**2-hop receiver 已以 v1
+  交易在公共主网 RPC simulate 绿灯（1499B）**。
+- 第一步（v1）已 e2e 验证，剩服务端接入；第二步替代「合约逐跳关户」方案
   （docs/UXUY_ROUTER_INTEGRATION.md 的待办），且顺带消灭每笔租金垫付/返还的
   交易内往返。
 - 第三步不阻塞任何现有功能。
