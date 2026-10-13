@@ -3,7 +3,7 @@ use crate::error::ErrorCode;
 use crate::processor::*;
 use crate::SA_AUTHORITY_SEED;
 
-use crate::utils::*;
+use crate::utils::{log_fee_accounts_info, log_rate_info_v3, log_rate_info_v3_enhanced};
 use crate::wsol_program;
 use anchor_lang::prelude::*;
 use anchor_spl::{
@@ -239,6 +239,9 @@ fn validate_sol_receiver_and_flags<'info>(
 
 /// ToB swap handler with optional specified receiver
 /// Supports both normal swaps and wSOL -> SOL conversion with custom receiver
+/// SPL Token CloseAccount instruction tag.
+const SPL_TOKEN_CLOSE_ACCOUNT: u8 = 51;
+
 pub fn swap_tob_specified_receiver_handler<'a>(
     ctx: Context<'_, '_, 'a, 'a, CommissionProxySwapAccountsV3WithReceiver<'a>>,
     args: SwapArgs,
@@ -328,7 +331,7 @@ pub fn swap_tob_specified_receiver_handler<'a>(
                     AccountMeta::new(payer_info.key(), false),
                     AccountMeta::new_readonly(authority_info.key(), false),
                 ],
-                data: vec![51],
+                data: vec![SPL_TOKEN_CLOSE_ACCOUNT],
             };
             anchor_lang::solana_program::program::invoke_signed(
                 &close_ix,

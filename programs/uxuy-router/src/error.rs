@@ -250,4 +250,9 @@ pub enum ErrorCode {
 
     #[msg("Deprecated dex variant")]
     DeprecatedDex,
+
+    #[msg("Slippage must be below 100%")]
+    SlippageTooHigh,
+    #[msg("Only single-path routes are supported")]
+    MultiPathNotSupported,
 }

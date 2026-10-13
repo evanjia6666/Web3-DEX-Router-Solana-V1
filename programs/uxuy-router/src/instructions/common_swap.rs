@@ -57,10 +57,8 @@ pub struct SwapArgs {
 
 impl SwapArgs {
     pub fn min_return(&self) -> u64 {
-        self.expect_amount_out
-            .checked_mul(10_000u64.saturating_sub(self.slippage as u64))
-            .expect("expect_amount_out overflow")
-            / 10_000
+        // u128 intermediate: expect * 10000 cannot overflow
+        ((self.expect_amount_out as u128) * (10_000u16.saturating_sub(self.slippage) as u128) / 10_000) as u64
     }
 }
 
@@ -403,15 +401,14 @@ fn execute_swap<'info>(
     // Check SwapArgs (min_return derived on-chain: expect x (1 - slippage))
     let SwapArgs { amount_in: _, expect_amount_out, slippage, routes, .. } = &args;
     require!(actual_amount_in > 0, ErrorCode::AmountInMustBeGreaterThanZero);
-    require!(*slippage < 10_000, ErrorCode::InvalidExpectAmountOut);
+    require!(*slippage < 10_000, ErrorCode::SlippageTooHigh);
     require!(*expect_amount_out >= args.min_return(), ErrorCode::InvalidExpectAmountOut);
-    require!(routes.len() == 1, ErrorCode::AmountsAndRoutesMustHaveTheSameLength); // single-path model
-    let _ = actual_amount_in;
+    require!(routes.len() == 1, ErrorCode::MultiPathNotSupported); // single-path model
 
     // Swap by Routes
     let mut offset: usize = 0;
     // Level 1 split handling
-    for (i, hops) in routes.iter().enumerate() {
+    for (_i, hops) in routes.iter().enumerate() {
         require!(hops.len() <= MAX_HOPS, ErrorCode::TooManyHops);
         let mut amount_in = actual_amount_in; // single-path: the whole amount rides routes[0]
 

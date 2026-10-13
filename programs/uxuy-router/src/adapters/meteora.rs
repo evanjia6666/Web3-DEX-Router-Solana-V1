@@ -2,9 +2,8 @@ use super::common::DexProcessor;
 use crate::adapters::common::{before_check, invoke_process};
 use crate::error::ErrorCode;
 use crate::{
-    DEPOSIT_SELECTOR, HopAccounts, SWAP_SELECTOR, SWAP2_SELECTOR, WITHDRAW_SELECTOR, ZERO_ADDRESS,
-    meteora_damm_v2_program, meteora_dlmm_program, meteora_dynamicpool_program,
-    meteora_vault_program,
+    HopAccounts, SWAP_SELECTOR, SWAP2_SELECTOR, ZERO_ADDRESS, meteora_damm_v2_program,
+    meteora_dlmm_program,
 };
 use anchor_lang::{prelude::*, solana_program::instruction::Instruction};
 use anchor_spl::token_interface::TokenAccount;
