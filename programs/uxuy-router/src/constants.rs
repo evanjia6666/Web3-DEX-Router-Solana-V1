@@ -258,3 +258,13 @@ pub mod pumpfun_program {
 // inside spendable_sol_in (net-of-fee formula), so rents are the only
 // extra native cost.
 pub const PUMPFUN_FUND_HEADROOM: u64 = 2_400_000;
+
+// pump.fun curve v2 token-settlement selectors (quote side rides token
+// accounts: USDC/USDT-quote curves, and wSOL-quote via the wrapped path)
+pub const PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR: &[u8; 8] = &[194, 171, 28, 70, 104, 77, 91, 47];
+pub const PUMPFUN_SELL_V2_SELECTOR: &[u8; 8] = &[93, 246, 130, 60, 231, 233, 64, 178];
+
+// v2 first-use rents charged from `user` (authority): user volume
+// accumulator (1,346,280) + its quote ATA (~2,039,280) + the curve's
+// creator-vault quote ATA (~2,039,280) plus margin.
+pub const PUMPFUN_V2_FUND_HEADROOM: u64 = 6_000_000;

@@ -2,9 +2,10 @@ use super::common::{before_check, invoke_process, DexProcessor};
 use crate::error::ErrorCode;
 use crate::utils::{close_token_account, sync_wsol_account, transfer_sol};
 use crate::{
-    HopAccounts, BUY_EXACT_SOL_IN_SELECTOR, MIN_SOL_ACCOUNT_RENT, PUMPFUN_FUND_HEADROOM,
-    PUMPFUN_SELL_SELECTOR, SOL_DIFF_LIMIT, SA_AUTHORITY_SEED, authority_pda, pumpfun_program,
-    wsol_sa,
+    HopAccounts, BUY_EXACT_SOL_IN_SELECTOR, MIN_SOL_ACCOUNT_RENT,
+    PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR, PUMPFUN_FUND_HEADROOM,
+    PUMPFUN_SELL_V2_SELECTOR, PUMPFUN_SELL_SELECTOR, PUMPFUN_V2_FUND_HEADROOM, SOL_DIFF_LIMIT,
+    SA_AUTHORITY_SEED, authority_pda, pumpfun_program, wsol_sa,
 };
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::Instruction;
@@ -525,4 +526,429 @@ pub fn sell<'a>(
         owner_seeds,
     )?;
     Ok(amount_out)
+}
+
+/*=================================== v2 (token settlement) ====================================*/
+
+// Dex::PumpfunBuyV2 / Dex::PumpfunSellV2 ride the curve's v2 token-settlement
+// instructions (buy_exact_quote_in_v2 / sell_v2): the quote side moves as
+// TOKENS (USDC/USDT-quote curves, or wSOL wrapped), so there is no native-SOL
+// bridging at all. Two caller-side obligations the wire pins:
+//
+//   - the quote-side user account (buy source / sell destination) is the
+//     canonical ATA of the swap authority for the quote mint — pump validates
+//     it (validate_user_quote_token_account); the Go side allocates
+//     authority-owned canonical ATAs for v2 hops;
+//   - the base-side user account only needs owner == authority (empirically
+//     an SPL owner check at the debit, no canonicality), so custody and
+//     per-tx temps keep working there.
+//
+// `user` still pays pump's on-first-use rents (volume accumulator + ATAs),
+// so on the PDA the payer pre-funds a headroom and sweeps the residue back
+// after the CPI — the same dance as the native buy, minus the close.
+const ARGS_LEN_V2: usize = 24;
+
+pub struct PumpfunV2Processor;
+
+impl DexProcessor for PumpfunV2Processor {
+    fn before_invoke(&self, account_infos: &[AccountInfo]) -> Result<u64> {
+        let authority = account_infos.get(V2_AUTHORITY_IDX).unwrap();
+        let before_authority_lamports = authority.lamports();
+        if authority.key() == authority_pda::ID {
+            if before_authority_lamports < PUMPFUN_V2_FUND_HEADROOM {
+                let payer = account_infos.last().unwrap();
+                transfer_sol(
+                    payer.to_account_info(),
+                    authority.to_account_info(),
+                    PUMPFUN_V2_FUND_HEADROOM - before_authority_lamports,
+                    None,
+                )?;
+            }
+        }
+        Ok(before_authority_lamports)
+    }
+
+    fn after_invoke(
+        &self,
+        account_infos: &[AccountInfo],
+        _hop: usize,
+        _owner_seeds: Option<&[&[&[u8]]]>,
+        _before_authority_lamports: u64,
+    ) -> Result<u64> {
+        let authority = account_infos.get(V2_AUTHORITY_IDX).unwrap();
+        if authority.key() == authority_pda::ID {
+            let drain = authority.lamports().saturating_sub(MIN_SOL_ACCOUNT_RENT);
+            require!(drain <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
+            if drain > 0 {
+                let payer = account_infos.last().unwrap();
+                transfer_sol(
+                    authority.to_account_info(),
+                    payer.to_account_info(),
+                    drain,
+                    Some(SA_AUTHORITY_SEED),
+                )?;
+                msg!("pumpfun v2: authority swept {} lamports back to payer", drain);
+            }
+        }
+        Ok(0)
+    }
+}
+// account_infos layout: CPI accounts in wire order, payer appended last
+const V2_AUTHORITY_IDX: usize = 13; // `user` slot of both v2 instructions
+
+pub struct PumpfunBuyV2Accounts<'info> {
+    pub dex_program_id: &'info AccountInfo<'info>,
+    pub swap_authority_pubkey: &'info AccountInfo<'info>,
+    pub swap_source_token: InterfaceAccount<'info, TokenAccount>, // canonical ATA(authority, quote)
+    pub swap_destination_token: InterfaceAccount<'info, TokenAccount>, // base out, owner == authority
+    pub global: &'info AccountInfo<'info>,
+    pub base_mint: &'info AccountInfo<'info>,
+    pub quote_mint: &'info AccountInfo<'info>,
+    pub base_token_program: &'info AccountInfo<'info>,
+    pub quote_token_program: &'info AccountInfo<'info>,
+    pub associated_token_program: &'info AccountInfo<'info>,
+    pub fee_recipient: &'info AccountInfo<'info>,
+    pub associated_quote_fee_recipient: &'info AccountInfo<'info>,
+    pub buyback_fee_recipient: &'info AccountInfo<'info>,
+    pub associated_quote_buyback_fee_recipient: &'info AccountInfo<'info>,
+    pub bonding_curve: &'info AccountInfo<'info>,
+    pub associated_base_bonding_curve: &'info AccountInfo<'info>,
+    pub associated_quote_bonding_curve: &'info AccountInfo<'info>,
+    pub creator_vault: &'info AccountInfo<'info>,
+    pub associated_creator_vault: &'info AccountInfo<'info>,
+    pub sharing_config: &'info AccountInfo<'info>,
+    pub global_volume_accumulator: &'info AccountInfo<'info>,
+    pub user_volume_accumulator: &'info AccountInfo<'info>,
+    pub associated_user_volume_accumulator: &'info AccountInfo<'info>,
+    pub fee_config: &'info AccountInfo<'info>,
+    pub fee_program: &'info AccountInfo<'info>,
+    pub system_program: &'info AccountInfo<'info>,
+    pub event_authority: &'info AccountInfo<'info>,
+    pub program: &'info AccountInfo<'info>,
+}
+const BUY_V2_ACCOUNTS_LEN: usize = 28;
+
+impl<'info> PumpfunBuyV2Accounts<'info> {
+    fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
+        let [
+            dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token,
+            global, base_mint, quote_mint, base_token_program, quote_token_program,
+            associated_token_program, fee_recipient, associated_quote_fee_recipient,
+            buyback_fee_recipient, associated_quote_buyback_fee_recipient, bonding_curve,
+            associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault,
+            associated_creator_vault, sharing_config, global_volume_accumulator,
+            user_volume_accumulator, associated_user_volume_accumulator, fee_config,
+            fee_program, system_program, event_authority, program,
+        ]: &[AccountInfo<'info>; BUY_V2_ACCOUNTS_LEN] =
+            array_ref![accounts, offset, BUY_V2_ACCOUNTS_LEN];
+
+        Ok(Self {
+            dex_program_id,
+            swap_authority_pubkey,
+            swap_source_token: InterfaceAccount::try_from(swap_source_token)?,
+            swap_destination_token: InterfaceAccount::try_from(swap_destination_token)?,
+            global, base_mint, quote_mint, base_token_program, quote_token_program,
+            associated_token_program, fee_recipient, associated_quote_fee_recipient,
+            buyback_fee_recipient, associated_quote_buyback_fee_recipient, bonding_curve,
+            associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault,
+            associated_creator_vault, sharing_config, global_volume_accumulator,
+            user_volume_accumulator, associated_user_volume_accumulator, fee_config,
+            fee_program, system_program, event_authority, program,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn buy_v2<'a>(
+    remaining_accounts: &'a [AccountInfo<'a>],
+    amount_in: u64,
+    offset: &mut usize,
+    hop_accounts: &mut HopAccounts,
+    hop: usize,
+    proxy_swap: bool,
+    owner_seeds: Option<&[&[&[u8]]]>,
+    payer: Option<&AccountInfo<'a>>,
+) -> Result<u64> {
+    msg!("Dex::PumpfunBuyV2 amount_in: {}, offset: {}", amount_in, offset);
+    require!(
+        remaining_accounts.len() >= *offset + BUY_V2_ACCOUNTS_LEN,
+        ErrorCode::InvalidAccountsLength
+    );
+    let mut swap_accounts = PumpfunBuyV2Accounts::parse_accounts(remaining_accounts, *offset)?;
+    if swap_accounts.dex_program_id.key != &pumpfun_program::id() {
+        return Err(ErrorCode::InvalidProgramId.into());
+    }
+    swap_accounts.bonding_curve.key().log();
+
+    before_check(
+        swap_accounts.swap_authority_pubkey,
+        &swap_accounts.swap_source_token,
+        swap_accounts.swap_destination_token.key(),
+        hop_accounts,
+        hop,
+        proxy_swap,
+        owner_seeds,
+    )?;
+
+    let mut data = Vec::with_capacity(ARGS_LEN_V2);
+    data.extend_from_slice(PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR);
+    data.extend_from_slice(&amount_in.to_le_bytes()); // spendable_quote_in (fees inside)
+    data.extend_from_slice(&1u64.to_le_bytes()); // min_tokens_out; route-level min_return protects the leg
+
+    let a = &swap_accounts;
+    let accounts = vec![
+        AccountMeta::new_readonly(a.global.key(), false),
+        AccountMeta::new_readonly(a.base_mint.key(), false),
+        AccountMeta::new_readonly(a.quote_mint.key(), false),
+        AccountMeta::new_readonly(a.base_token_program.key(), false),
+        AccountMeta::new_readonly(a.quote_token_program.key(), false),
+        AccountMeta::new_readonly(a.associated_token_program.key(), false),
+        AccountMeta::new(a.fee_recipient.key(), false),
+        AccountMeta::new(a.associated_quote_fee_recipient.key(), false),
+        AccountMeta::new(a.buyback_fee_recipient.key(), false),
+        AccountMeta::new(a.associated_quote_buyback_fee_recipient.key(), false),
+        AccountMeta::new(a.bonding_curve.key(), false),
+        AccountMeta::new(a.associated_base_bonding_curve.key(), false),
+        AccountMeta::new(a.associated_quote_bonding_curve.key(), false),
+        AccountMeta::new(a.swap_authority_pubkey.key(), true),
+        AccountMeta::new(a.swap_destination_token.key(), false),
+        AccountMeta::new(a.swap_source_token.key(), false),
+        AccountMeta::new(a.creator_vault.key(), false),
+        AccountMeta::new(a.associated_creator_vault.key(), false),
+        AccountMeta::new_readonly(a.sharing_config.key(), false),
+        AccountMeta::new_readonly(a.global_volume_accumulator.key(), false),
+        AccountMeta::new(a.user_volume_accumulator.key(), false),
+        AccountMeta::new(a.associated_user_volume_accumulator.key(), false),
+        AccountMeta::new_readonly(a.fee_config.key(), false),
+        AccountMeta::new_readonly(a.fee_program.key(), false),
+        AccountMeta::new_readonly(a.system_program.key(), false),
+        AccountMeta::new_readonly(a.event_authority.key(), false),
+        AccountMeta::new_readonly(a.program.key(), false),
+    ];
+
+    let account_infos = [
+        a.global.to_account_info(),
+        a.base_mint.to_account_info(),
+        a.quote_mint.to_account_info(),
+        a.base_token_program.to_account_info(),
+        a.quote_token_program.to_account_info(),
+        a.associated_token_program.to_account_info(),
+        a.fee_recipient.to_account_info(),
+        a.associated_quote_fee_recipient.to_account_info(),
+        a.buyback_fee_recipient.to_account_info(),
+        a.associated_quote_buyback_fee_recipient.to_account_info(),
+        a.bonding_curve.to_account_info(),
+        a.associated_base_bonding_curve.to_account_info(),
+        a.associated_quote_bonding_curve.to_account_info(),
+        a.swap_authority_pubkey.to_account_info(),
+        a.swap_destination_token.to_account_info(),
+        a.swap_source_token.to_account_info(),
+        a.creator_vault.to_account_info(),
+        a.associated_creator_vault.to_account_info(),
+        a.sharing_config.to_account_info(),
+        a.global_volume_accumulator.to_account_info(),
+        a.user_volume_accumulator.to_account_info(),
+        a.associated_user_volume_accumulator.to_account_info(),
+        a.fee_config.to_account_info(),
+        a.fee_program.to_account_info(),
+        a.system_program.to_account_info(),
+        a.event_authority.to_account_info(),
+        a.program.to_account_info(),
+        payer.unwrap().to_account_info(),
+    ];
+
+    let instruction =
+        Instruction { program_id: swap_accounts.dex_program_id.key(), accounts, data };
+
+    invoke_process(
+        amount_in,
+        &PumpfunV2Processor,
+        &account_infos,
+        &mut swap_accounts.swap_source_token,
+        &mut swap_accounts.swap_destination_token,
+        hop_accounts,
+        instruction,
+        hop,
+        offset,
+        BUY_V2_ACCOUNTS_LEN,
+        proxy_swap,
+        owner_seeds,
+    )
+}
+
+pub struct PumpfunSellV2Accounts<'info> {
+    pub dex_program_id: &'info AccountInfo<'info>,
+    pub swap_authority_pubkey: &'info AccountInfo<'info>,
+    pub swap_source_token: InterfaceAccount<'info, TokenAccount>, // base in, owner == authority
+    pub swap_destination_token: InterfaceAccount<'info, TokenAccount>, // canonical ATA(authority, quote)
+    pub global: &'info AccountInfo<'info>,
+    pub base_mint: &'info AccountInfo<'info>,
+    pub quote_mint: &'info AccountInfo<'info>,
+    pub base_token_program: &'info AccountInfo<'info>,
+    pub quote_token_program: &'info AccountInfo<'info>,
+    pub associated_token_program: &'info AccountInfo<'info>,
+    pub fee_recipient: &'info AccountInfo<'info>,
+    pub associated_quote_fee_recipient: &'info AccountInfo<'info>,
+    pub buyback_fee_recipient: &'info AccountInfo<'info>,
+    pub associated_quote_buyback_fee_recipient: &'info AccountInfo<'info>,
+    pub bonding_curve: &'info AccountInfo<'info>,
+    pub associated_base_bonding_curve: &'info AccountInfo<'info>,
+    pub associated_quote_bonding_curve: &'info AccountInfo<'info>,
+    pub creator_vault: &'info AccountInfo<'info>,
+    pub associated_creator_vault: &'info AccountInfo<'info>,
+    pub sharing_config: &'info AccountInfo<'info>,
+    pub user_volume_accumulator: &'info AccountInfo<'info>,
+    pub associated_user_volume_accumulator: &'info AccountInfo<'info>,
+    pub fee_config: &'info AccountInfo<'info>,
+    pub fee_program: &'info AccountInfo<'info>,
+    pub system_program: &'info AccountInfo<'info>,
+    pub event_authority: &'info AccountInfo<'info>,
+    pub program: &'info AccountInfo<'info>,
+}
+const SELL_V2_ACCOUNTS_LEN: usize = 27;
+
+impl<'info> PumpfunSellV2Accounts<'info> {
+    fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
+        let [
+            dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token,
+            global, base_mint, quote_mint, base_token_program, quote_token_program,
+            associated_token_program, fee_recipient, associated_quote_fee_recipient,
+            buyback_fee_recipient, associated_quote_buyback_fee_recipient, bonding_curve,
+            associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault,
+            associated_creator_vault, sharing_config, user_volume_accumulator,
+            associated_user_volume_accumulator, fee_config, fee_program, system_program,
+            event_authority, program,
+        ]: &[AccountInfo<'info>; SELL_V2_ACCOUNTS_LEN] =
+            array_ref![accounts, offset, SELL_V2_ACCOUNTS_LEN];
+
+        Ok(Self {
+            dex_program_id,
+            swap_authority_pubkey,
+            swap_source_token: InterfaceAccount::try_from(swap_source_token)?,
+            swap_destination_token: InterfaceAccount::try_from(swap_destination_token)?,
+            global, base_mint, quote_mint, base_token_program, quote_token_program,
+            associated_token_program, fee_recipient, associated_quote_fee_recipient,
+            buyback_fee_recipient, associated_quote_buyback_fee_recipient, bonding_curve,
+            associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault,
+            associated_creator_vault, sharing_config, user_volume_accumulator,
+            associated_user_volume_accumulator, fee_config, fee_program, system_program,
+            event_authority, program,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn sell_v2<'a>(
+    remaining_accounts: &'a [AccountInfo<'a>],
+    amount_in: u64,
+    offset: &mut usize,
+    hop_accounts: &mut HopAccounts,
+    hop: usize,
+    proxy_swap: bool,
+    owner_seeds: Option<&[&[&[u8]]]>,
+    payer: Option<&AccountInfo<'a>>,
+) -> Result<u64> {
+    msg!("Dex::PumpfunSellV2 amount_in: {}, offset: {}", amount_in, offset);
+    require!(
+        remaining_accounts.len() >= *offset + SELL_V2_ACCOUNTS_LEN,
+        ErrorCode::InvalidAccountsLength
+    );
+    let mut swap_accounts = PumpfunSellV2Accounts::parse_accounts(remaining_accounts, *offset)?;
+    if swap_accounts.dex_program_id.key != &pumpfun_program::id() {
+        return Err(ErrorCode::InvalidProgramId.into());
+    }
+    swap_accounts.bonding_curve.key().log();
+
+    before_check(
+        swap_accounts.swap_authority_pubkey,
+        &swap_accounts.swap_source_token,
+        swap_accounts.swap_destination_token.key(),
+        hop_accounts,
+        hop,
+        proxy_swap,
+        owner_seeds,
+    )?;
+
+    let mut data = Vec::with_capacity(ARGS_LEN_V2);
+    data.extend_from_slice(PUMPFUN_SELL_V2_SELECTOR);
+    data.extend_from_slice(&amount_in.to_le_bytes()); // base amount in
+    data.extend_from_slice(&1u64.to_le_bytes()); // min quote out; route-level min_return protects the leg
+
+    let a = &swap_accounts;
+    let accounts = vec![
+        AccountMeta::new_readonly(a.global.key(), false),
+        AccountMeta::new_readonly(a.base_mint.key(), false),
+        AccountMeta::new_readonly(a.quote_mint.key(), false),
+        AccountMeta::new_readonly(a.base_token_program.key(), false),
+        AccountMeta::new_readonly(a.quote_token_program.key(), false),
+        AccountMeta::new_readonly(a.associated_token_program.key(), false),
+        AccountMeta::new(a.fee_recipient.key(), false),
+        AccountMeta::new(a.associated_quote_fee_recipient.key(), false),
+        AccountMeta::new(a.buyback_fee_recipient.key(), false),
+        AccountMeta::new(a.associated_quote_buyback_fee_recipient.key(), false),
+        AccountMeta::new(a.bonding_curve.key(), false),
+        AccountMeta::new(a.associated_base_bonding_curve.key(), false),
+        AccountMeta::new(a.associated_quote_bonding_curve.key(), false),
+        AccountMeta::new(a.swap_authority_pubkey.key(), true),
+        AccountMeta::new(a.swap_source_token.key(), false),
+        AccountMeta::new(a.swap_destination_token.key(), false),
+        AccountMeta::new(a.creator_vault.key(), false),
+        AccountMeta::new(a.associated_creator_vault.key(), false),
+        AccountMeta::new_readonly(a.sharing_config.key(), false),
+        AccountMeta::new(a.user_volume_accumulator.key(), false),
+        AccountMeta::new(a.associated_user_volume_accumulator.key(), false),
+        AccountMeta::new_readonly(a.fee_config.key(), false),
+        AccountMeta::new_readonly(a.fee_program.key(), false),
+        AccountMeta::new_readonly(a.system_program.key(), false),
+        AccountMeta::new_readonly(a.event_authority.key(), false),
+        AccountMeta::new_readonly(a.program.key(), false),
+    ];
+
+    let account_infos = [
+        a.global.to_account_info(),
+        a.base_mint.to_account_info(),
+        a.quote_mint.to_account_info(),
+        a.base_token_program.to_account_info(),
+        a.quote_token_program.to_account_info(),
+        a.associated_token_program.to_account_info(),
+        a.fee_recipient.to_account_info(),
+        a.associated_quote_fee_recipient.to_account_info(),
+        a.buyback_fee_recipient.to_account_info(),
+        a.associated_quote_buyback_fee_recipient.to_account_info(),
+        a.bonding_curve.to_account_info(),
+        a.associated_base_bonding_curve.to_account_info(),
+        a.associated_quote_bonding_curve.to_account_info(),
+        a.swap_authority_pubkey.to_account_info(),
+        a.swap_source_token.to_account_info(),
+        a.swap_destination_token.to_account_info(),
+        a.creator_vault.to_account_info(),
+        a.associated_creator_vault.to_account_info(),
+        a.sharing_config.to_account_info(),
+        a.user_volume_accumulator.to_account_info(),
+        a.associated_user_volume_accumulator.to_account_info(),
+        a.fee_config.to_account_info(),
+        a.fee_program.to_account_info(),
+        a.system_program.to_account_info(),
+        a.event_authority.to_account_info(),
+        a.program.to_account_info(),
+        payer.unwrap().to_account_info(),
+    ];
+
+    let instruction =
+        Instruction { program_id: swap_accounts.dex_program_id.key(), accounts, data };
+
+    invoke_process(
+        amount_in,
+        &PumpfunV2Processor,
+        &account_infos,
+        &mut swap_accounts.swap_source_token,
+        &mut swap_accounts.swap_destination_token,
+        hop_accounts,
+        instruction,
+        hop,
+        offset,
+        SELL_V2_ACCOUNTS_LEN,
+        proxy_swap,
+        owner_seeds,
+    )
 }

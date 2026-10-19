@@ -108,6 +108,14 @@ uxuy 引擎的路由模型是"单路径、每跳一个最优池、最多 3 跳"�
 
 CPI 以 `amount, min_sol_output=1` 执行（无尾部账户），after_invoke 把 authority 收到的原生 SOL **实额**转入 dst 并 `sync_native`。不需要一次性临时账户（dst 可为托管 wSOL）。
 
+### PumpfunBuyV2 — pump.fun 曲线 `buy_exact_quote_in_v2`（28 账户，2026-10 新增，ordinal 17）
+`dex_program_id, swap_authority_pubkey, swap_source_token（canonical ATA(authority, quote)——pump 校验）, swap_destination_token（base 出账，仅校验 owner）, global, base_mint, quote_mint, base_token_program, quote_token_program, associated_token_program, fee_recipient, associated_quote_fee_recipient, buyback_fee_recipient, associated_quote_buyback_fee_recipient, bonding_curve, associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault, associated_creator_vault, sharing_config, global_volume_accumulator, user_volume_accumulator, associated_user_volume_accumulator, fee_config, fee_program, system_program, event_authority, program`
+
+v2 代币结算：quote 侧走 token 账户（USDC/USDT 曲线，或 wSOL 包装路径——legacy System-quote 曲线也接受 wSOL，链上实证）。无原生 SOL 桥接；PDA 场景 payer 预补 6M 租金余量（uva+其 quote ATA+creator-vault ATA 首建）事后扫回。args = (spendable_quote_in=amount_in, min_tokens_out=1)，无尾部账户（buyback 对是声明账户，官方 7VtfL8/5YxQFdt 已模拟验证授权）。
+
+### PumpfunSellV2 — pump.fun 曲线 `sell_v2`（27 账户，2026-10 新增，ordinal 18）
+同 buy_v2 布局减 global_volume_accumulator。`swap_source_token`（base 入账，仅校验 owner）→ `swap_destination_token`（canonical ATA(authority, quote)）。args = (amount, min_quote_out=1)。**形状约束（compose 强制）**：quote 目的地是 hop authority 的 canonical ATA —— v2 sell 只能是 hop0 末跳无 receiver，或中间跳（hop≥1 末跳禁止：PDA 的 ATA ≠ 用户收款账户）。
+
 ### ByrealClmm — Byreal `swap_v2`（24 账户，含 payer；程序另有 `swap_v3_dyn`，动态费池仅接受后者）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, payer, amm_config, pool_state, input_token_account, output_token_account, input_vault, output_vault, observation_state, token_program, token_program_2022, memo_program, input_vault_mint, output_vault_mint, tickarray_bitmap_extension, tick_array0..tick_array5`
 

@@ -31,6 +31,8 @@ pub enum Dex {
     ByrealClmm2,
     PumpfunBuy,
     PumpfunSell,
+    PumpfunBuyV2,
+    PumpfunSellV2,
 }
 
 #[derive(Debug)]
@@ -571,6 +573,30 @@ fn distribute_swap<'a>(
         }
         Dex::PumpfunSell => {
             return pumpfun::sell(
+                remaining_accounts,
+                amount_in,
+                offset,
+                hop_accounts,
+                hop,
+                proxy_from,
+                owner_seeds,
+                payer,
+            );
+        }
+        Dex::PumpfunBuyV2 => {
+            return pumpfun::buy_v2(
+                remaining_accounts,
+                amount_in,
+                offset,
+                hop_accounts,
+                hop,
+                proxy_from,
+                owner_seeds,
+                payer,
+            );
+        }
+        Dex::PumpfunSellV2 => {
+            return pumpfun::sell_v2(
                 remaining_accounts,
                 amount_in,
                 offset,
