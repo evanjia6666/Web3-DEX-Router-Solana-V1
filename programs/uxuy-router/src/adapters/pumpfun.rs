@@ -398,8 +398,8 @@ impl DexProcessor for PumpfunSellProcessor {
         before_authority_lamports: u64,
     ) -> Result<u64> {
         let authority = account_infos.get(6).unwrap();
-        let wsol_program = account_infos.get(SELL_PROCESSOR_LEN - 3).unwrap();
-        let destination_token_account = account_infos.get(SELL_PROCESSOR_LEN - 2).unwrap();
+        let wsol_program = account_infos.get(SELL_PROCESSOR_LEN - 2).unwrap();
+        let destination_token_account = account_infos.last().unwrap();
 
         let signer_seeds: Option<&[&[&[u8]]]> = if authority.key() == authority_pda::ID {
             Some(SA_AUTHORITY_SEED)
@@ -429,9 +429,10 @@ impl DexProcessor for PumpfunSellProcessor {
         Ok(received)
     }
 }
-// account_infos handed to the processor: the 14 CPI accounts, then the
-// wrap helpers (wsol program, destination, payer)
-const SELL_PROCESSOR_LEN: usize = 17;
+// account_infos handed to the processor: the 14 CPI accounts plus the two
+// wrap helpers (wsol program, destination). The sell moves no payer funds,
+// so unlike buy there is no payer slot.
+const SELL_PROCESSOR_LEN: usize = 16;
 
 #[allow(clippy::too_many_arguments)]
 pub fn sell<'a>(
@@ -442,7 +443,7 @@ pub fn sell<'a>(
     hop: usize,
     proxy_swap: bool,
     owner_seeds: Option<&[&[&[u8]]]>,
-    payer: Option<&AccountInfo<'a>>,
+    _payer: Option<&AccountInfo<'a>>,
 ) -> Result<u64> {
     msg!("Dex::PumpfunSell amount_in: {}, offset: {}", amount_in, offset);
     require!(
@@ -503,7 +504,6 @@ pub fn sell<'a>(
         swap_accounts.fee_program.to_account_info(),
         swap_accounts.wsol_program.to_account_info(),
         swap_accounts.swap_destination_token.to_account_info(),
-        payer.unwrap().to_account_info(),
     ];
 
     let instruction =
