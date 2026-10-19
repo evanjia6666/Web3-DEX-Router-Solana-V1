@@ -309,7 +309,7 @@ pub fn buy<'a>(
         offset,
         BUY_ACCOUNTS_LEN,
         proxy_swap,
-        None,
+        owner_seeds,
     )?;
     Ok(amount_out)
 }
