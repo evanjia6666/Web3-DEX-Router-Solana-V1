@@ -3,6 +3,7 @@ pub mod byreal_clmm2;
 pub mod common;
 pub mod meteora;
 pub mod pancake_swap_v3;
+pub mod pumpfun;
 pub mod pumpfunamm;
 pub mod raydium;
 pub mod whirlpool;

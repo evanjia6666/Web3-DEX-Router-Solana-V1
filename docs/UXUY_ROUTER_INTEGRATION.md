@@ -98,6 +98,16 @@ uxuy 引擎的路由模型是"单路径、每跳一个最优池、最多 3 跳"�
 ### PumpfunammSell3 — PumpSwap `sell`（21 账户）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, pool, global_config, base_mint, quote_mint, pool_base_token_account, pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account, base_token_program, quote_token_program, system_program, associated_token_program, event_authority, coin_creator_vault_ata, coin_creator_vault_authority, fee_config, fee_program`
 
+### PumpfunBuy — pump.fun 曲线 `buy_exact_sol_in`（20 账户，2026-10 新增，ordinal 15）
+`dex_program_id, swap_authority_pubkey, swap_source_token（一次性 wSOL 临时，会被 close）, swap_destination_token, global, fee_recipient, mint, bonding_curve, associated_bonding_curve, system_program, src_token_program（SPL，close 用）, base_token_program（曲线币，常为 Token-2022）, creator_vault, event_authority, global_volume_accumulator, user_volume_accumulator, fee_config, fee_program, buyback_a, buyback_b`
+
+原生 SOL 桥接：before_invoke 把 src wSOL 临时账户 close 进 authority（PDA 场景 payer 预补租金差额），CPI 以 `spendable_sol_in=amount_in, min_tokens_out=1, track_volume 缺省（None，不建用户量累计器）` 执行，after_invoke 把 authority 高于租金下限的部分扫回 payer。buyback 双尾槽是 2026-10 程序强制要求（第二槽须授权金库；两个槽都传 5YxQFdt…，主网模拟已证）。fee_recipient 钉死 pump 默认 7VtfL8…（按币授权：自设分润的币拒收，路由换次优）。
+
+### PumpfunSell — pump.fun 曲线 `sell`（16 账户，2026-10 新增，ordinal 16）
+`dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token（wSOL）, global, fee_recipient, mint, bonding_curve, associated_bonding_curve, system_program, creator_vault, base_token_program, wsol_program（SPL，wrap 用）, event_authority, fee_config, fee_program`
+
+CPI 以 `amount, min_sol_output=1` 执行（无尾部账户），after_invoke 把 authority 收到的原生 SOL **实额**转入 dst 并 `sync_native`。不需要一次性临时账户（dst 可为托管 wSOL）。
+
 ### ByrealClmm — Byreal `swap_v2`（24 账户，含 payer；程序另有 `swap_v3_dyn`，动态费池仅接受后者）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, payer, amm_config, pool_state, input_token_account, output_token_account, input_vault, output_vault, observation_state, token_program, token_program_2022, memo_program, input_vault_mint, output_vault_mint, tickarray_bitmap_extension, tick_array0..tick_array5`
 

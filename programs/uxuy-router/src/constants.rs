@@ -243,3 +243,18 @@ pub mod byreal_clmm_program {
     pub const ID: Pubkey = Pubkey::from_str_const("REALQqNEomY6cQGZJUGwywTBD2UmDT32rZcNnfxQ5N2");
     pub fn id() -> Pubkey { ID }
 }
+
+// pumpfun_program: pump.fun bonding curve (pre-graduation trading)
+pub mod pumpfun_program {
+    use anchor_lang::prelude::*;
+    pub const ID: Pubkey = Pubkey::from_str_const("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+    pub fn id() -> Pubkey { ID }
+}
+
+// Headroom the pump.fun curve buy keeps available on the swap authority on
+// top of the spend itself: pump may idempotently create the curve's creator
+// vault (rent.minimum_balance(0) = 890_880) and the user volume accumulator
+// (rent 1_346_280 observed on chain) from the `user` account. Fees ride
+// inside spendable_sol_in (net-of-fee formula), so rents are the only
+// extra native cost.
+pub const PUMPFUN_FUND_HEADROOM: u64 = 2_400_000;

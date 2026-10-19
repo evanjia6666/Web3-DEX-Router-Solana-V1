@@ -10,7 +10,8 @@ use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 // uxuy-router supported DEX set, pruned from the upstream OKX V1 router (104 variants)
 // to the liquidity sources the uxuy offline quoting engine can execute:
 // Raydium AMM v4 / CPMM / CLMM, Orca Whirlpool, PancakeSwap CLMM,
-// Meteora DLMM, PumpSwap (pump_amm) and Byreal CLMM.
+// Meteora DLMM, PumpSwap (pump_amm), Byreal CLMM and the pump.fun
+// bonding curve. Ordinals are frozen on-chain: append-only after deploy.
 #[derive(AnchorSerialize, AnchorDeserialize, Copy, Clone, PartialEq, Eq, Debug, strum::Display)]
 pub enum Dex {
     RaydiumSwap,
@@ -28,6 +29,8 @@ pub enum Dex {
     PumpfunammSell3,
     ByrealClmm,
     ByrealClmm2,
+    PumpfunBuy,
+    PumpfunSell,
 }
 
 #[derive(Debug)]
@@ -554,6 +557,30 @@ fn distribute_swap<'a>(
         }
         Dex::ByrealClmm => byreal_clmm::swap_v2,
         Dex::ByrealClmm2 => byreal_clmm2::swap_v2,
+        Dex::PumpfunBuy => {
+            return pumpfun::buy(
+                remaining_accounts,
+                amount_in,
+                offset,
+                hop_accounts,
+                hop,
+                proxy_from,
+                owner_seeds,
+                payer,
+            );
+        }
+        Dex::PumpfunSell => {
+            return pumpfun::sell(
+                remaining_accounts,
+                amount_in,
+                offset,
+                hop_accounts,
+                hop,
+                proxy_from,
+                owner_seeds,
+                payer,
+            );
+        }
     };
     swap_function(remaining_accounts, amount_in, offset, hop_accounts, hop, proxy_from, owner_seeds)
 }
