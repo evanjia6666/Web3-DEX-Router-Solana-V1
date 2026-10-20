@@ -952,3 +952,94 @@ pub fn sell_v2<'a>(
         owner_seeds,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anchor_lang::solana_program::hash::hash;
+
+    fn disc(name: &str) -> [u8; 8] {
+        let h = hash(name.as_bytes()).to_bytes();
+        let mut d = [0u8; 8];
+        d.copy_from_slice(&h[..8]);
+        d
+    }
+
+    fn expect_disc(constant: &[u8; 8], name: &str) {
+        assert_eq!(constant[..], disc(name), "selector for {} drifted", name);
+    }
+
+    // The selectors are hand-pinned constants: pin each against the anchor
+    // derivation (sha256("global:<ix>")[:8]) so a typo cannot reach the wire.
+    #[test]
+    pub fn test_selector_derivations() {
+        expect_disc(PUMPFUN_SELL_SELECTOR, "global:sell");
+        expect_disc(BUY_EXACT_SOL_IN_SELECTOR, "global:buy_exact_sol_in");
+        expect_disc(PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR, "global:buy_exact_quote_in_v2");
+        expect_disc(PUMPFUN_SELL_V2_SELECTOR, "global:sell_v2");
+    }
+
+    // Data packing mirrors each adapter's CPI payload: discriminator +
+    // two LE u64 args, 24 bytes, no track_volume byte (OptionBool omitted
+    // deserializes as None on chain).
+    #[test]
+    pub fn test_pack_buy_exact_sol_in() {
+        let amount_in = 1_000_000u64;
+        let mut data = Vec::with_capacity(ARGS_LEN);
+        data.extend_from_slice(BUY_EXACT_SOL_IN_SELECTOR);
+        data.extend_from_slice(&amount_in.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        assert_eq!(data.len(), ARGS_LEN);
+        assert_eq!(&data[..8], &BUY_EXACT_SOL_IN_SELECTOR[..]);
+        assert_eq!(u64::from_le_bytes(data[8..16].try_into().unwrap()), amount_in);
+        assert_eq!(u64::from_le_bytes(data[16..24].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    pub fn test_pack_sell() {
+        let amount_in = 42u64;
+        let mut data = Vec::with_capacity(ARGS_LEN);
+        data.extend_from_slice(PUMPFUN_SELL_SELECTOR);
+        data.extend_from_slice(&amount_in.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        assert_eq!(data.len(), ARGS_LEN);
+        assert_eq!(u64::from_le_bytes(data[8..16].try_into().unwrap()), amount_in);
+    }
+
+    #[test]
+    pub fn test_pack_v2_instructions() {
+        for (selector, args_len) in [
+            (PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR, ARGS_LEN_V2),
+            (PUMPFUN_SELL_V2_SELECTOR, ARGS_LEN_V2),
+        ] {
+            let amount_in = 7u64;
+            let mut data = Vec::with_capacity(args_len);
+            data.extend_from_slice(selector);
+            data.extend_from_slice(&amount_in.to_le_bytes());
+            data.extend_from_slice(&1u64.to_le_bytes());
+            assert_eq!(data.len(), args_len);
+            assert_eq!(&data[..8], &selector[..]);
+            assert_eq!(u64::from_le_bytes(data[8..16].try_into().unwrap()), amount_in);
+            assert_eq!(u64::from_le_bytes(data[16..24].try_into().unwrap()), 1);
+        }
+    }
+
+    // The remaining-accounts windows: every parse_accounts destructuring
+    // pattern must consume exactly its declared window length or the
+    // offset cursor derails the rest of the route. Window = 4 routing
+    // slots (dex/authority/src/dst) + CPI accounts minus the three that
+    // fold into the routing slots (user, base/quote user) + adapters'
+    // helper-only slots (never CPI'd): v1 buy carries src_token_program
+    // for the wSOL close, v1 sell carries wsol_program for the wrap.
+    #[test]
+    pub fn test_window_lengths() {
+        assert_eq!(BUY_ACCOUNTS_LEN, 4 + 18 - 3 + 1); // +src_token_program
+        assert_eq!(SELL_ACCOUNTS_LEN, 4 + 14 - 3 + 1); // +wsol_program
+        assert_eq!(BUY_V2_ACCOUNTS_LEN, 4 + 27 - 3);
+        assert_eq!(SELL_V2_ACCOUNTS_LEN, 4 + 26 - 3);
+        // processor rows: CPI accounts + helpers (+payer)
+        assert_eq!(BUY_PROCESSOR_LEN, 18 + 3); // +src prog, payer, src
+        assert_eq!(SELL_PROCESSOR_LEN, 14 + 2); // +wsol prog, destination
+        assert_eq!(V2_AUTHORITY_IDX, 13); // `user` slot of both v2 layouts
+    }
+}
