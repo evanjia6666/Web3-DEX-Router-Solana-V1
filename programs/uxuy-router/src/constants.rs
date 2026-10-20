@@ -270,9 +270,16 @@ pub const PUMPFUN_SELL_V2_SELECTOR: &[u8; 8] = &[93, 246, 130, 60, 231, 233, 64,
 pub const PUMPFUN_V2_FUND_HEADROOM: u64 = 6_000_000;
 
 // Headroom the pump AMM (pumpswap) buy fronts on the swap authority when the
-// per-user volume accumulator is still unborn: buy_exact_quote_in creates it
-// from the `user` slot (rent 1_346_200 observed on chain, test net sim
-// 2026-10-20; the account is per-USER, seed carries no pool, so the charge
-// happens once ever per authority). Everything unspent is swept back to the
-// payer in the after-hook, so this caps only the transient front.
-pub const PUMPFUNAMM_FUND_HEADROOM: u64 = 2_000_000;
+// per-user volume accumulator is still unborn: buy_exact_quote_in used to
+// create it from the `user` slot (rent 1_346_200 observed on chain, test net
+// sim 2026-10-16; the account is per-USER, seed carries no pool, so the
+// charge happened once ever per authority). 2026-10-20 the upgraded pump
+// program no longer charges that rent on BuyExactQuoteIn (live sim green
+// with an unborn accumulator and a zero-lamport authority), so the front is
+// defensive now: sized to also cover the program's other possible first-use
+// charges from the `user` slot (creator-vault / fee-recipient quote ATAs,
+// ~1_513_840 each, T22 ATA rent observed 2026-10-16). Everything unspent is
+// swept back to the payer in the after-hook (drain guarded by
+// SOL_DIFF_LIMIT, which this stays below), so this caps only the transient
+// front and costs nothing in the steady state.
+pub const PUMPFUNAMM_FUND_HEADROOM: u64 = 6_000_000;

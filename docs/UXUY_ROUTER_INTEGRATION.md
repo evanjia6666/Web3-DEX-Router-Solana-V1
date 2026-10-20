@@ -95,7 +95,9 @@ uxuy 引擎的路由模型是"单路径、每跳一个最优池、最多 3 跳"�
 ### PumpfunammBuy3 — PumpSwap `buy_exact_quote_in`（23 账户，含 `track_volume=OptionBool{true}` 尾字节）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, pool, global_config, base_mint, quote_mint, pool_base_token_account, pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account, base_token_program, quote_token_program, system_program, associated_token_program, event_authority, coin_creator_vault_ata, coin_creator_vault_authority, global_volume_accumulator, user_volume_accumulator, fee_config, fee_program`
 
-2026-10-20 起带首买租金垫付：`user_volume_accumulator` 是 per-user 账户（种子只含 user；PDA 场景 user 槽即 authority），首建租金 1,346,200 由 pump 向 user 槽收取，而 authority PDA 不持有 lamports。PDA 场景下 before_invoke 在累计器未建（lamports=0 且 data_len=0）时由 payer 预补 `PUMPFUNAMM_FUND_HEADROOM`（2M）差额，after_invoke 把 authority 结算回原水平（缺口由 payer 补齐，与 sell 处理器同款；多余扫回 payer 沿曲线买入处理器的模式），钱包净成本=直连 pump 首买。垫付走合约顶层 `payer` 账户，段账户表（上面 23+尾三槽）不变。
+2026-10-20 起带首买租金垫付：`user_volume_accumulator` 是 per-user 账户（种子只含 user；PDA 场景 user 槽即 authority），首建租金 1,346,200 由 pump 向 user 槽收取，而 authority PDA 不持有 lamports。PDA 场景下 before_invoke 在累计器未建（lamports=0 且 data_len=0）时由 payer 预补 `PUMPFUNAMM_FUND_HEADROOM`（6M，2026-10-20 由 2M 提额以覆盖 pump 其他可能的 user 槽首建费用：creator-vault / fee-recipient quote ATA 各约 1,513,840）差额，after_invoke 把 authority 结算回原水平（缺口由 payer 补齐，与 sell 处理器同款；多余扫回 payer 沿曲线买入处理器的模式），钱包净成本=直连 pump 首买。垫付走合约顶层 `payer` 账户，段账户表（上面 23+尾三槽）不变。
+
+**2026-10-20 实测更新**：pump 程序 2026-10 升级后 `BuyExactQuoteIn` 已不再向 user 槽收首建租金（测试网 live simulate：accumulator 未出生 + authority 0 lamports 直接成交，日志无任何租金事件；SOL→PAID 单跳与 USDC→SOL→PAID 三跳全绿）。垫付保留为防御性逻辑（若 pump 恢复收费即自动生效），稳态零开销。
 
 ### PumpfunammSell3 — PumpSwap `sell`（21 账户）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, pool, global_config, base_mint, quote_mint, pool_base_token_account, pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account, base_token_program, quote_token_program, system_program, associated_token_program, event_authority, coin_creator_vault_ata, coin_creator_vault_authority, fee_config, fee_program`
