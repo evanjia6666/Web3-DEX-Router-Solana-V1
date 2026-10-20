@@ -37,6 +37,30 @@ use arrayref::array_ref;
 // no user volume accumulator is created and its rent never applies.
 const ARGS_LEN: usize = 24;
 
+/// The 2026-10 trailing pair, in the order pump validates it: the
+/// bonding-curve-v2 PDA (read-only) then an authorized buyback fee recipient
+/// (writable). Shared by the buy and sell legs so order/permissions live in
+/// exactly one place.
+fn pump_curve_tail_metas(curve_v2: Pubkey, buyback: Pubkey) -> [AccountMeta; 2] {
+    [
+        AccountMeta::new_readonly(curve_v2, false),
+        AccountMeta::new(buyback, false),
+    ]
+}
+
+/// Which trailing-account layout the curve CPI targets. The 2026-10 pump
+/// upgrade removed the free-form second buyback slot and now expects the
+/// `bonding-curve-v2` PDA there instead (sell gained the same pair), so the
+/// old and new shapes are selected by the Dex variant, never auto-detected.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CurveLayout {
+    /// pre-2026-10 wire: buy carries two buyback slots, sell carries none
+    Legacy,
+    /// 2026-10 wire: buy/sell both end with [bonding-curve-v2 (ro),
+    /// buyback fee recipient (w)]; the volume accumulator is writable
+    Tail202610,
+}
+
 /*===================================== buy =====================================*/
 
 pub struct PumpfunBuyAccounts<'info> {
@@ -66,6 +90,9 @@ pub struct PumpfunBuyAccounts<'info> {
 }
 // remaining-accounts window: the 20 above
 const BUY_ACCOUNTS_LEN: usize = 20;
+// 2026-10 buy keeps the same 20-slot window: the last two slots change
+// meaning (bonding-curve-v2 + buyback) rather than count.
+const BUY_202610_ACCOUNTS_LEN: usize = BUY_ACCOUNTS_LEN;
 // account_infos handed to the processor: the 18 CPI accounts, then the
 // close/sweep helpers (src program, payer, src)
 const BUY_PROCESSOR_LEN: usize = 21;
@@ -222,9 +249,66 @@ pub fn buy<'a>(
     owner_seeds: Option<&[&[&[u8]]]>,
     payer: Option<&AccountInfo<'a>>,
 ) -> Result<u64> {
-    msg!("Dex::PumpfunBuy amount_in: {}, offset: {}", amount_in, offset);
+    buy_with_layout(
+        remaining_accounts,
+        amount_in,
+        offset,
+        hop_accounts,
+        hop,
+        proxy_swap,
+        owner_seeds,
+        payer,
+        CurveLayout::Legacy,
+    )
+}
+
+/// 2026-10 pump curve buy (Dex::PumpfunBuy202610). Same 20-slot window as the
+/// legacy buy, but the two trailing slots carry the bonding-curve-v2 PDA
+/// (read-only) and the authorized buyback recipient (writable), and the
+/// global volume accumulator is writable.
+#[allow(clippy::too_many_arguments)]
+pub fn buy_202610<'a>(
+    remaining_accounts: &'a [AccountInfo<'a>],
+    amount_in: u64,
+    offset: &mut usize,
+    hop_accounts: &mut HopAccounts,
+    hop: usize,
+    proxy_swap: bool,
+    owner_seeds: Option<&[&[&[u8]]]>,
+    payer: Option<&AccountInfo<'a>>,
+) -> Result<u64> {
+    buy_with_layout(
+        remaining_accounts,
+        amount_in,
+        offset,
+        hop_accounts,
+        hop,
+        proxy_swap,
+        owner_seeds,
+        payer,
+        CurveLayout::Tail202610,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn buy_with_layout<'a>(
+    remaining_accounts: &'a [AccountInfo<'a>],
+    amount_in: u64,
+    offset: &mut usize,
+    hop_accounts: &mut HopAccounts,
+    hop: usize,
+    proxy_swap: bool,
+    owner_seeds: Option<&[&[&[u8]]]>,
+    payer: Option<&AccountInfo<'a>>,
+    layout: CurveLayout,
+) -> Result<u64> {
+    let (leg, window) = match layout {
+        CurveLayout::Legacy => ("PumpfunBuy", BUY_ACCOUNTS_LEN),
+        CurveLayout::Tail202610 => ("PumpfunBuy202610", BUY_202610_ACCOUNTS_LEN),
+    };
+    msg!("Dex::{} amount_in: {}, offset: {}", leg, amount_in, offset);
     require!(
-        remaining_accounts.len() >= *offset + BUY_ACCOUNTS_LEN,
+        remaining_accounts.len() >= *offset + window,
         ErrorCode::InvalidAccountsLength
     );
     let mut swap_accounts = PumpfunBuyAccounts::parse_accounts(remaining_accounts, *offset)?;
@@ -263,12 +347,30 @@ pub fn buy<'a>(
     accounts.push(AccountMeta::new(swap_accounts.creator_vault.key(), false));
     accounts.push(AccountMeta::new_readonly(swap_accounts.event_authority.key(), false));
     accounts.push(AccountMeta::new_readonly(swap_accounts.dex_program_id.key(), false));
-    accounts.push(AccountMeta::new_readonly(swap_accounts.global_volume_accumulator.key(), false));
+    if layout == CurveLayout::Tail202610 {
+        // pump bumps the volume counter on every trade; writable under the
+        // 2026-10 wire (the legacy one stays read-only for rollback parity)
+        accounts.push(AccountMeta::new(swap_accounts.global_volume_accumulator.key(), false));
+    } else {
+        accounts.push(AccountMeta::new_readonly(swap_accounts.global_volume_accumulator.key(), false));
+    }
     accounts.push(AccountMeta::new(swap_accounts.user_volume_accumulator.key(), false));
     accounts.push(AccountMeta::new_readonly(swap_accounts.fee_config.key(), false));
     accounts.push(AccountMeta::new_readonly(swap_accounts.fee_program.key(), false));
-    accounts.push(AccountMeta::new(swap_accounts.buyback_a.key(), false));
-    accounts.push(AccountMeta::new(swap_accounts.buyback_b.key(), false));
+    match layout {
+        CurveLayout::Legacy => {
+            accounts.push(AccountMeta::new(swap_accounts.buyback_a.key(), false));
+            accounts.push(AccountMeta::new(swap_accounts.buyback_b.key(), false));
+        }
+        CurveLayout::Tail202610 => {
+            // Go fills these two slots with the bonding-curve-v2 PDA and the
+            // authorized buyback recipient, in that order.
+            accounts.extend_from_slice(&pump_curve_tail_metas(
+                swap_accounts.buyback_a.key(),
+                swap_accounts.buyback_b.key(),
+            ));
+        }
+    }
 
     let account_infos = [
         swap_accounts.global.to_account_info(),
@@ -335,9 +437,14 @@ pub struct PumpfunSellAccounts<'info> {
     pub event_authority: &'info AccountInfo<'info>,
     pub fee_config: &'info AccountInfo<'info>,
     pub fee_program: &'info AccountInfo<'info>,
+    // 2026-10 trailing pair; None on the legacy layout
+    pub curve_v2: Option<&'info AccountInfo<'info>>,
+    pub buyback_fee_recipient: Option<&'info AccountInfo<'info>>,
 }
 // remaining-accounts window: the 16 above
 const SELL_ACCOUNTS_LEN: usize = 16;
+// 2026-10 window: the legacy 16 plus the [bonding-curve-v2, buyback] pair
+const SELL_202610_ACCOUNTS_LEN: usize = SELL_ACCOUNTS_LEN + 2;
 
 impl<'info> PumpfunSellAccounts<'info> {
     fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
@@ -378,7 +485,18 @@ impl<'info> PumpfunSellAccounts<'info> {
             event_authority,
             fee_config,
             fee_program,
+            curve_v2: None,
+            buyback_fee_recipient: None,
         })
+    }
+
+    /// 2026-10 layout: the legacy 16 slots, then the
+    /// [bonding-curve-v2, buyback] pair the current pump program requires.
+    fn parse_accounts_202610(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
+        let mut parsed = Self::parse_accounts(accounts, offset)?;
+        parsed.curve_v2 = Some(&accounts[offset + SELL_ACCOUNTS_LEN]);
+        parsed.buyback_fee_recipient = Some(&accounts[offset + SELL_ACCOUNTS_LEN + 1]);
+        Ok(parsed)
     }
 }
 
@@ -399,7 +517,10 @@ impl DexProcessor for PumpfunSellProcessor {
         before_authority_lamports: u64,
     ) -> Result<u64> {
         let authority = account_infos.get(6).unwrap();
-        let wsol_program = account_infos.get(SELL_PROCESSOR_LEN - 2).unwrap();
+        // the two wrap helpers are always the trailing pair of account_infos;
+        // the 2026-10 layout inserts the curve pair before them, so index
+        // from the end instead of a fixed window length
+        let wsol_program = account_infos.get(account_infos.len() - 2).unwrap();
         let destination_token_account = account_infos.last().unwrap();
 
         let signer_seeds: Option<&[&[&[u8]]]> = if authority.key() == authority_pda::ID {
@@ -430,10 +551,10 @@ impl DexProcessor for PumpfunSellProcessor {
         Ok(received)
     }
 }
-// account_infos handed to the processor: the 14 CPI accounts plus the two
-// wrap helpers (wsol program, destination). The sell moves no payer funds,
-// so unlike buy there is no payer slot.
-const SELL_PROCESSOR_LEN: usize = 16;
+// account_infos handed to the processor: the 14 CPI accounts (plus the
+// 2026-10 curve pair when that layout is used) and the two wrap helpers
+// (wsol program, destination). The sell moves no payer funds, so unlike buy
+// there is no payer slot.
 
 #[allow(clippy::too_many_arguments)]
 pub fn sell<'a>(
@@ -444,14 +565,75 @@ pub fn sell<'a>(
     hop: usize,
     proxy_swap: bool,
     owner_seeds: Option<&[&[&[u8]]]>,
-    _payer: Option<&AccountInfo<'a>>,
+    payer: Option<&AccountInfo<'a>>,
 ) -> Result<u64> {
-    msg!("Dex::PumpfunSell amount_in: {}, offset: {}", amount_in, offset);
+    sell_with_layout(
+        remaining_accounts,
+        amount_in,
+        offset,
+        hop_accounts,
+        hop,
+        proxy_swap,
+        owner_seeds,
+        payer,
+        CurveLayout::Legacy,
+    )
+}
+
+/// 2026-10 pump curve sell (Dex::PumpfunSell202610): the legacy 16-slot
+/// window plus the [bonding-curve-v2 (ro), buyback recipient (w)] pair the
+/// current pump program requires on the sell CPI.
+#[allow(clippy::too_many_arguments)]
+pub fn sell_202610<'a>(
+    remaining_accounts: &'a [AccountInfo<'a>],
+    amount_in: u64,
+    offset: &mut usize,
+    hop_accounts: &mut HopAccounts,
+    hop: usize,
+    proxy_swap: bool,
+    owner_seeds: Option<&[&[&[u8]]]>,
+    payer: Option<&AccountInfo<'a>>,
+) -> Result<u64> {
+    sell_with_layout(
+        remaining_accounts,
+        amount_in,
+        offset,
+        hop_accounts,
+        hop,
+        proxy_swap,
+        owner_seeds,
+        payer,
+        CurveLayout::Tail202610,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sell_with_layout<'a>(
+    remaining_accounts: &'a [AccountInfo<'a>],
+    amount_in: u64,
+    offset: &mut usize,
+    hop_accounts: &mut HopAccounts,
+    hop: usize,
+    proxy_swap: bool,
+    owner_seeds: Option<&[&[&[u8]]]>,
+    _payer: Option<&AccountInfo<'a>>,
+    layout: CurveLayout,
+) -> Result<u64> {
+    let (leg, window) = match layout {
+        CurveLayout::Legacy => ("PumpfunSell", SELL_ACCOUNTS_LEN),
+        CurveLayout::Tail202610 => ("PumpfunSell202610", SELL_202610_ACCOUNTS_LEN),
+    };
+    msg!("Dex::{} amount_in: {}, offset: {}", leg, amount_in, offset);
     require!(
-        remaining_accounts.len() >= *offset + SELL_ACCOUNTS_LEN,
+        remaining_accounts.len() >= *offset + window,
         ErrorCode::InvalidAccountsLength
     );
-    let mut swap_accounts = PumpfunSellAccounts::parse_accounts(remaining_accounts, *offset)?;
+    let mut swap_accounts = match layout {
+        CurveLayout::Legacy => PumpfunSellAccounts::parse_accounts(remaining_accounts, *offset)?,
+        CurveLayout::Tail202610 => {
+            PumpfunSellAccounts::parse_accounts_202610(remaining_accounts, *offset)?
+        }
+    };
     if swap_accounts.dex_program_id.key != &pumpfun_program::id() {
         return Err(ErrorCode::InvalidProgramId.into());
     }
@@ -487,8 +669,14 @@ pub fn sell<'a>(
     accounts.push(AccountMeta::new_readonly(swap_accounts.dex_program_id.key(), false));
     accounts.push(AccountMeta::new_readonly(swap_accounts.fee_config.key(), false));
     accounts.push(AccountMeta::new_readonly(swap_accounts.fee_program.key(), false));
+    if layout == CurveLayout::Tail202610 {
+        accounts.extend_from_slice(&pump_curve_tail_metas(
+            swap_accounts.curve_v2.unwrap().key(),
+            swap_accounts.buyback_fee_recipient.unwrap().key(),
+        ));
+    }
 
-    let account_infos = [
+    let mut account_infos = vec![
         swap_accounts.global.to_account_info(),
         swap_accounts.fee_recipient.to_account_info(),
         swap_accounts.mint.to_account_info(),
@@ -503,9 +691,13 @@ pub fn sell<'a>(
         swap_accounts.dex_program_id.to_account_info(),
         swap_accounts.fee_config.to_account_info(),
         swap_accounts.fee_program.to_account_info(),
-        swap_accounts.wsol_program.to_account_info(),
-        swap_accounts.swap_destination_token.to_account_info(),
     ];
+    if layout == CurveLayout::Tail202610 {
+        account_infos.push(swap_accounts.curve_v2.unwrap().to_account_info());
+        account_infos.push(swap_accounts.buyback_fee_recipient.unwrap().to_account_info());
+    }
+    account_infos.push(swap_accounts.wsol_program.to_account_info());
+    account_infos.push(swap_accounts.swap_destination_token.to_account_info());
 
     let instruction =
         Instruction { program_id: swap_accounts.dex_program_id.key(), accounts, data };
@@ -521,7 +713,7 @@ pub fn sell<'a>(
         instruction,
         hop,
         offset,
-        SELL_ACCOUNTS_LEN,
+        window,
         proxy_swap,
         owner_seeds,
     )?;
@@ -1006,6 +1198,33 @@ mod tests {
         assert_eq!(u64::from_le_bytes(data[8..16].try_into().unwrap()), amount_in);
     }
 
+    // 2026-10 windows: the buy window is unchanged (the tail changes meaning,
+    // not length); the sell window grows by the two curve-pair accounts.
+    #[test]
+    pub fn test_202610_window_lengths() {
+        assert_eq!(BUY_202610_ACCOUNTS_LEN, BUY_ACCOUNTS_LEN);
+        assert_eq!(BUY_202610_ACCOUNTS_LEN, 4 + 18 - 3 + 1); // +src_token_program
+        assert_eq!(SELL_202610_ACCOUNTS_LEN, SELL_ACCOUNTS_LEN + 2);
+        assert_eq!(SELL_202610_ACCOUNTS_LEN, 4 + 16 - 3 + 1); // +wsol_program
+    }
+
+    // The 2026-10 tail pair: bonding-curve-v2 first and read-only, the
+    // authorized buyback recipient second and writable. Swapping either the
+    // order or the writability reproduces the on-chain failures this wire
+    // pinning exists to prevent (6074 / privilege escalation).
+    #[test]
+    pub fn test_pump_curve_tail_metas() {
+        let curve_v2 = Pubkey::new_unique();
+        let buyback = Pubkey::new_unique();
+        let tail = pump_curve_tail_metas(curve_v2, buyback);
+        assert_eq!(tail[0].pubkey, curve_v2);
+        assert!(!tail[0].is_writable, "bonding-curve-v2 must be read-only");
+        assert!(!tail[0].is_signer);
+        assert_eq!(tail[1].pubkey, buyback);
+        assert!(tail[1].is_writable, "buyback recipient must be writable");
+        assert!(!tail[1].is_signer);
+    }
+
     #[test]
     pub fn test_pack_v2_instructions() {
         for (selector, args_len) in [
@@ -1039,7 +1258,6 @@ mod tests {
         assert_eq!(SELL_V2_ACCOUNTS_LEN, 4 + 26 - 3);
         // processor rows: CPI accounts + helpers (+payer)
         assert_eq!(BUY_PROCESSOR_LEN, 18 + 3); // +src prog, payer, src
-        assert_eq!(SELL_PROCESSOR_LEN, 14 + 2); // +wsol prog, destination
         assert_eq!(V2_AUTHORITY_IDX, 13); // `user` slot of both v2 layouts
     }
 }

@@ -33,6 +33,11 @@ pub enum Dex {
     PumpfunSell,
     PumpfunBuyV2,
     PumpfunSellV2,
+    // 2026-10 pump curve wire: the same legs with the [bonding-curve-v2,
+    // buyback] trailing pair the upgraded pump program requires. Appended
+    // after the frozen ordinals so older routers keep decoding 0..=18.
+    PumpfunBuy202610,
+    PumpfunSell202610,
 }
 
 #[derive(Debug)]
@@ -608,6 +613,54 @@ fn distribute_swap<'a>(
                 payer,
             );
         }
+        Dex::PumpfunBuy202610 => {
+            return pumpfun::buy_202610(
+                remaining_accounts,
+                amount_in,
+                offset,
+                hop_accounts,
+                hop,
+                proxy_from,
+                owner_seeds,
+                payer,
+            );
+        }
+        Dex::PumpfunSell202610 => {
+            return pumpfun::sell_202610(
+                remaining_accounts,
+                amount_in,
+                offset,
+                hop_accounts,
+                hop,
+                proxy_from,
+                owner_seeds,
+                payer,
+            );
+        }
     };
     swap_function(remaining_accounts, amount_in, offset, hop_accounts, hop, proxy_from, owner_seeds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ordinal(dex: Dex) -> u8 {
+        let mut out = Vec::new();
+        dex.serialize(&mut out).expect("dex serializes to one byte");
+        out[0]
+    }
+
+    // The Dex ordinals are the router wire contract: gdex's
+    // swapper/sol/router constants mirror these bytes. Appending is safe,
+    // reordering breaks every caller — pin the pump.fun curve range.
+    #[test]
+    pub fn test_dex_ordinals_pump_curve() {
+        assert_eq!(ordinal(Dex::PumpfunBuy), 15);
+        assert_eq!(ordinal(Dex::PumpfunSell), 16);
+        assert_eq!(ordinal(Dex::PumpfunBuyV2), 17);
+        assert_eq!(ordinal(Dex::PumpfunSellV2), 18);
+        assert_eq!(ordinal(Dex::PumpfunBuy202610), 19);
+        assert_eq!(ordinal(Dex::PumpfunSell202610), 20);
+    }
 }
