@@ -3,8 +3,8 @@ use crate::adapters::common::{before_check, invoke_process};
 use crate::error::ErrorCode;
 use crate::utils::transfer_sol;
 use crate::{
-    BUY_EXACT_QUOTE_IN_SELECTOR, HopAccounts, PUMPFUN_SELL_SELECTOR, SOL_DIFF_LIMIT, authority_pda,
-    pumpfunamm_program,
+    BUY_EXACT_QUOTE_IN_SELECTOR, HopAccounts, PUMPFUN_SELL_SELECTOR, PUMPFUNAMM_FUND_HEADROOM,
+    SA_AUTHORITY_SEED, SOL_DIFF_LIMIT, authority_pda, pumpfunamm_program,
 };
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::Instruction;
@@ -305,6 +305,12 @@ pub struct PumpfunammBuyAccounts3<'info> {
 }
 const BUY_ACCOUNTS_LEN3: usize = 26;
 
+// Fixed indices into the buy adapter's account_infos. pool_v2 is appended
+// after these slots, so both stay stable whether or not the pool carries it;
+// the payer rides last (see buy3).
+const BUY_AUTHORITY_IDX: usize = 1;
+const BUY_USER_VOLUME_ACC_IDX: usize = 20;
+
 impl<'info> PumpfunammBuyAccounts3<'info> {
     fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
         let [
@@ -368,7 +374,90 @@ impl<'info> PumpfunammBuyAccounts3<'info> {
     }
 }
 pub struct PumpfunammBuyProcessor;
-impl DexProcessor for PumpfunammBuyProcessor {}
+impl DexProcessor for PumpfunammBuyProcessor {
+    fn before_invoke(&self, account_infos: &[AccountInfo]) -> Result<u64> {
+        let authority = account_infos.get(BUY_AUTHORITY_IDX).unwrap();
+        let before_authority_lamports = authority.lamports();
+
+        if authority.key() != authority_pda::ID {
+            // wallet-authority hop (no custody): the wallet itself is the
+            // pump `user` and pays pump's first-use rents exactly like a
+            // direct trade — nothing to front or sweep
+            return Ok(before_authority_lamports);
+        }
+
+        // Custody topology: the authority PDA sits in pump's `user` slot, so
+        // the first-ever buy makes pump create the per-user volume
+        // accumulator and charge its rent to the PDA — which carries no
+        // lamports by design. Front a headroom while the accumulator is
+        // unborn; the after-hook sweeps the residue back, so steady-state
+        // buys (accumulator exists) move no native lamports at all.
+        let user_volume_accumulator = account_infos.get(BUY_USER_VOLUME_ACC_IDX).unwrap();
+        let accumulator_missing =
+            user_volume_accumulator.lamports() == 0 && user_volume_accumulator.data_len() == 0;
+        if accumulator_missing && before_authority_lamports < PUMPFUNAMM_FUND_HEADROOM {
+            let payer = account_infos.last().unwrap();
+            transfer_sol(
+                payer.to_account_info(),
+                authority.to_account_info(),
+                PUMPFUNAMM_FUND_HEADROOM - before_authority_lamports,
+                None,
+            )?;
+        }
+        Ok(before_authority_lamports)
+    }
+
+    fn after_invoke(
+        &self,
+        account_infos: &[AccountInfo],
+        _hop: usize,
+        _owner_seeds: Option<&[&[&[u8]]]>,
+        before_authority_lamports: u64,
+    ) -> Result<u64> {
+        let authority = account_infos.get(BUY_AUTHORITY_IDX).unwrap();
+        if authority.key() != authority_pda::ID {
+            return Ok(0);
+        }
+        // Settle the authority back to its pre-swap level so the PDA stays a
+        // pure signing entity: the unspent front is swept back to the payer,
+        // and — symmetric with the sell processor — any lamports the CPI did
+        // consume beyond it (e.g. a rent top-up on an existing accumulator)
+        // is reimbursed by the payer. The wallet nets exactly the rent pump
+        // charged, mirroring the cost profile of a direct pump buy.
+        let after_authority_lamports = authority.lamports();
+        let payer = account_infos.last().unwrap();
+        if after_authority_lamports >= before_authority_lamports {
+            let drain = after_authority_lamports - before_authority_lamports;
+            require!(drain <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
+            transfer_sol(
+                authority.to_account_info(),
+                payer.to_account_info(),
+                drain,
+                Some(SA_AUTHORITY_SEED),
+            )?;
+            if drain > 0 {
+                msg!(
+                    "pumpfunamm buy: authority swept {} lamports back to payer",
+                    drain
+                );
+            }
+        } else {
+            let diff = before_authority_lamports - after_authority_lamports;
+            require!(diff <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
+            transfer_sol(
+                payer.to_account_info(),
+                authority.to_account_info(),
+                diff,
+                None,
+            )?;
+            msg!(
+                "pumpfunamm buy: payer reimbursed authority {} lamports",
+                diff
+            );
+        }
+        Ok(0)
+    }
+}
 
 pub fn buy3<'a>(
     remaining_accounts: &'a [AccountInfo<'a>],
@@ -378,6 +467,7 @@ pub fn buy3<'a>(
     hop: usize,
     proxy_swap: bool,
     owner_seeds: Option<&[&[&[u8]]]>,
+    payer: Option<&AccountInfo<'a>>,
 ) -> Result<u64> {
     msg!("Dex::Pumpfunamm amount_in: {}, offset: {}", amount_in, offset);
     require!(
@@ -461,7 +551,7 @@ pub fn buy3<'a>(
     accounts.push(AccountMeta::new_readonly(swap_accounts.buyback_fee_recipient.key(), false));
     accounts.push(AccountMeta::new(swap_accounts.buyback_fee_recipient_quote_ata.key(), false));
 
-    let mut account_infos = arrayvec::ArrayVec::<_, { BUY_ACCOUNTS_LEN3 }>::new();
+    let mut account_infos = arrayvec::ArrayVec::<_, { BUY_ACCOUNTS_LEN3 + 1 }>::new();
     account_infos.push(swap_accounts.pool.to_account_info());
     account_infos.push(swap_accounts.swap_authority_pubkey.to_account_info());
     account_infos.push(swap_accounts.global_config.to_account_info());
@@ -490,6 +580,9 @@ pub fn buy3<'a>(
     }
     account_infos.push(swap_accounts.buyback_fee_recipient.to_account_info());
     account_infos.push(swap_accounts.buyback_fee_recipient_quote_ata.to_account_info());
+    // payer rides last: buy-side first-use rents (user volume accumulator)
+    // are fronted from it and swept back — see PumpfunammBuyProcessor
+    account_infos.push(payer.unwrap().to_account_info());
 
     let instruction =
         Instruction { program_id: swap_accounts.dex_program_id.key(), accounts, data };

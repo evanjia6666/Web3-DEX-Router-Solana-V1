@@ -543,6 +543,7 @@ fn distribute_swap<'a>(
                 hop,
                 proxy_from,
                 owner_seeds,
+                payer,
             );
         }
         Dex::PumpfunammSell3 => {

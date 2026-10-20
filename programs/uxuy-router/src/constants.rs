@@ -268,3 +268,11 @@ pub const PUMPFUN_SELL_V2_SELECTOR: &[u8; 8] = &[93, 246, 130, 60, 231, 233, 64,
 // accumulator (1,346,280) + its quote ATA (~2,039,280) + the curve's
 // creator-vault quote ATA (~2,039,280) plus margin.
 pub const PUMPFUN_V2_FUND_HEADROOM: u64 = 6_000_000;
+
+// Headroom the pump AMM (pumpswap) buy fronts on the swap authority when the
+// per-user volume accumulator is still unborn: buy_exact_quote_in creates it
+// from the `user` slot (rent 1_346_200 observed on chain, test net sim
+// 2026-10-20; the account is per-USER, seed carries no pool, so the charge
+// happens once ever per authority). Everything unspent is swept back to the
+// payer in the after-hook, so this caps only the transient front.
+pub const PUMPFUNAMM_FUND_HEADROOM: u64 = 2_000_000;
