@@ -1,5 +1,7 @@
-776512
-# uxuy_router.so @ sbpfv3, platform-tools v1.58 (rustc 1.95.0-dev), HEAD after the
-# &dyn invoke_process dedup. History: 659,760 (old anchor toolchain, de71a19 era)
-# → 793,112/845,408 (v1.51.1 pre/post pumpfun) → 732,352/778,960 (v1.58 pre/post)
-# → 776,512 (v1.58 + dyn dedup). Never compare sizes across toolchains.
+780256
+# uxuy_router.so @ sbpfv3, platform-tools v1.58 (rustc 1.95.0-dev), HEAD 472b4b3
+# (pump AMM first-buy rent front, 6489eca). History: 659,760 (old anchor toolchain,
+# de71a19 era) → 793,112/845,408 (v1.51.1 pre/post pumpfun) → 732,352/778,960
+# (v1.58 pre/post) → 776,512 (v1.58 + dyn dedup) → 780,256 (+ rent front).
+# Never compare sizes across toolchains; the DEPLOY artifact is the STRIPPED
+# sbpfv2 build (see ~/.config/uxuy/sbf-env.sh), this number is tracking only.
