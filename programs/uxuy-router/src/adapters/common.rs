@@ -77,9 +77,9 @@ pub fn before_check(
     Ok(())
 }
 
-pub fn invoke_process<'info, T: DexProcessor>(
+pub fn invoke_process<'info>(
     amount_in: u64,
-    dex_processor: &T,
+    dex_processor: &dyn DexProcessor,
     account_infos: &[AccountInfo],
     swap_source_token: &mut InterfaceAccount<'info, TokenAccount>,
     swap_destination_token: &mut InterfaceAccount<'info, TokenAccount>,
@@ -125,9 +125,9 @@ pub fn invoke_process<'info, T: DexProcessor>(
     )
 }
 
-pub fn invoke_processes<'info, T: DexProcessor>(
+pub fn invoke_processes<'info>(
     amount_in: u64,
-    dex_processor: &T,
+    dex_processor: &dyn DexProcessor,
     account_infos_arr: &[&[AccountInfo]],
     swap_source_token: &mut InterfaceAccount<'info, TokenAccount>,
     swap_destination_token: &mut InterfaceAccount<'info, TokenAccount>,
