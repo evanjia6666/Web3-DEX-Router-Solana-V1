@@ -21,7 +21,7 @@ pub trait DexProcessor {
         _account_infos: &[AccountInfo],
         _hop: usize,
         _owner_seeds: Option<&[&[&[u8]]]>,
-        _before_sa_authority_lamports: u64,
+        _before_authority_lamports: u64,
     ) -> Result<u64> {
         Ok(0)
     }

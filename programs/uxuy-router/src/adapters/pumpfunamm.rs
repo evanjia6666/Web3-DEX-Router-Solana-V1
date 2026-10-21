@@ -105,14 +105,7 @@ impl<'info> PumpfunammSellAccounts3<'info> {
 pub struct PumpfunammSellProcessor;
 impl DexProcessor for PumpfunammSellProcessor {
     fn before_invoke(&self, account_infos: &[AccountInfo]) -> Result<u64> {
-        let authority = account_infos.get(1).unwrap();
-
-        if authority.key() == authority_pda::ID {
-            let before_authority_lamports = authority.lamports();
-            Ok(before_authority_lamports)
-        } else {
-            Ok(0)
-        }
+        Ok(account_infos.get(1).unwrap().lamports())
     }
 
     fn after_invoke(
@@ -120,33 +113,24 @@ impl DexProcessor for PumpfunammSellProcessor {
         account_infos: &[AccountInfo],
         _hop: usize,
         _owner_seeds: Option<&[&[&[u8]]]>,
-        before_sa_authority_lamports: u64,
+        before_authority_lamports: u64,
     ) -> Result<u64> {
         let authority = account_infos.get(1).unwrap();
-        let payer = account_infos.last().unwrap();
         if authority.key() == authority_pda::ID {
-            let after_authority_lamports = authority.lamports();
+            // a first-use rent pump charged to the `user` slot during the
+            // sell is absorbed by the authority's standing balance —
+            // surfaced for ops, never reimbursed by the payer
             let diff_lamports =
-                before_sa_authority_lamports.saturating_sub(after_authority_lamports);
-            require!(diff_lamports <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
+                before_authority_lamports.saturating_sub(authority.lamports());
             if diff_lamports > 0 {
-                transfer_sol(
-                    payer.to_account_info(),
-                    authority.to_account_info(),
-                    diff_lamports,
-                    None,
-                )?;
+                require!(diff_lamports <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
                 msg!(
-                    "before_sa_authority_lamports: {}, after_authority_lamports: {}, diff_lamports: {}",
-                    before_sa_authority_lamports,
-                    after_authority_lamports,
+                    "pumpfunamm sell: authority bore {} lamports of pump first-use rent",
                     diff_lamports
                 );
             }
-            Ok(diff_lamports)
-        } else {
-            Ok(0)
         }
+        Ok(0)
     }
 }
 
@@ -388,21 +372,19 @@ impl DexProcessor for PumpfunammBuyProcessor {
 
         // Custody topology: the authority PDA sits in pump's `user` slot, so
         // the first-ever buy makes pump create the per-user volume
-        // accumulator and charge its rent to the PDA — which carries no
-        // lamports by design. Front a headroom while the accumulator is
-        // unborn; the after-hook sweeps the residue back, so steady-state
-        // buys (accumulator exists) move no native lamports at all.
+        // accumulator and charge its rent to the PDA. The authority's
+        // standing balance (seeded by ops) bears it: fail fast while the
+        // accumulator is unborn and the balance can't cover the rent — the
+        // payer is never charged, and steady-state buys (accumulator
+        // exists) move no native lamports at all.
         let user_volume_accumulator = account_infos.get(BUY_USER_VOLUME_ACC_IDX).unwrap();
         let accumulator_missing =
             user_volume_accumulator.lamports() == 0 && user_volume_accumulator.data_len() == 0;
-        if accumulator_missing && before_authority_lamports < PUMPFUNAMM_FUND_HEADROOM {
-            let payer = account_infos.last().unwrap();
-            transfer_sol(
-                payer.to_account_info(),
-                authority.to_account_info(),
-                PUMPFUNAMM_FUND_HEADROOM - before_authority_lamports,
-                None,
-            )?;
+        if accumulator_missing {
+            require!(
+                before_authority_lamports >= PUMPFUNAMM_FUND_HEADROOM,
+                ErrorCode::InsufficientFunds
+            );
         }
         Ok(before_authority_lamports)
     }
@@ -418,41 +400,24 @@ impl DexProcessor for PumpfunammBuyProcessor {
         if authority.key() != authority_pda::ID {
             return Ok(0);
         }
-        // Settle the authority back to its pre-swap level so the PDA stays a
-        // pure signing entity: the unspent front is swept back to the payer,
-        // and — symmetric with the sell processor — any lamports the CPI did
-        // consume beyond it (e.g. a rent top-up on an existing accumulator)
-        // is reimbursed by the payer. The wallet nets exactly the rent pump
-        // charged, mirroring the cost profile of a direct pump buy.
-        let after_authority_lamports = authority.lamports();
-        let payer = account_infos.last().unwrap();
-        if after_authority_lamports >= before_authority_lamports {
-            let drain = after_authority_lamports - before_authority_lamports;
-            require!(drain <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
+        // Settle any surplus back to the payer; a deficit is pump's
+        // first-use rent charged to the `user` slot, absorbed by the
+        // authority's standing balance — the payer is never charged.
+        let drain = authority
+            .lamports()
+            .saturating_sub(before_authority_lamports);
+        require!(drain <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
+        if drain > 0 {
+            let payer = account_infos.last().unwrap();
             transfer_sol(
                 authority.to_account_info(),
                 payer.to_account_info(),
                 drain,
                 Some(SA_AUTHORITY_SEED),
             )?;
-            if drain > 0 {
-                msg!(
-                    "pumpfunamm buy: authority swept {} lamports back to payer",
-                    drain
-                );
-            }
-        } else {
-            let diff = before_authority_lamports - after_authority_lamports;
-            require!(diff <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
-            transfer_sol(
-                payer.to_account_info(),
-                authority.to_account_info(),
-                diff,
-                None,
-            )?;
             msg!(
-                "pumpfunamm buy: payer reimbursed authority {} lamports",
-                diff
+                "pumpfunamm buy: authority swept {} lamports back to payer",
+                drain
             );
         }
         Ok(0)

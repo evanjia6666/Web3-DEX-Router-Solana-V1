@@ -2,10 +2,10 @@ use super::common::{before_check, invoke_process, DexProcessor};
 use crate::error::ErrorCode;
 use crate::utils::{close_token_account, sync_wsol_account, transfer_sol};
 use crate::{
-    HopAccounts, BUY_EXACT_SOL_IN_SELECTOR, MIN_SOL_ACCOUNT_RENT,
-    PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR, PUMPFUN_FUND_HEADROOM,
-    PUMPFUN_SELL_V2_SELECTOR, PUMPFUN_SELL_SELECTOR, PUMPFUN_V2_FUND_HEADROOM, SOL_DIFF_LIMIT,
-    SA_AUTHORITY_SEED, authority_pda, pumpfun_program, wsol_sa,
+    HopAccounts, BUY_EXACT_SOL_IN_SELECTOR, PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR,
+    PUMPFUN_FUND_HEADROOM, PUMPFUN_SELL_V2_SELECTOR, PUMPFUN_SELL_SELECTOR,
+    PUMPFUN_V2_FUND_HEADROOM, SOL_DIFF_LIMIT, SA_AUTHORITY_SEED, authority_pda, pumpfun_program,
+    wsol_sa,
 };
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::Instruction;
@@ -22,9 +22,12 @@ use arrayref::array_ref;
 //
 //   buy  — before the CPI the (disposable, never custody) wSOL source
 //          account is closed into the authority, releasing rent + wrapped
-//          input as native SOL; on the PDA the payer tops up any shortfall
-//          against pump's on-first-use rents, and after the CPI everything
-//          above the rent floor is swept back to the payer.
+//          input as native SOL; after the CPI exactly the temp's fronted
+//          rent is refunded to the payer, so the funding wallet nets zero.
+//          Pump's on-first-use rents (the per-user volume accumulator, plus
+//          the creator vault on a coin's first-ever buy) are borne by the
+//          authority's standing balance — ops seeds it once
+//          (≥ PUMPFUN_FUND_HEADROOM) and the payer is never charged.
 //   sell — the CPI pays the authority natively; after it the exact received
 //          delta is transferred into the wSOL destination account and
 //          sync_native'd, restoring the token-account settlement model.
@@ -33,8 +36,11 @@ use arrayref::array_ref;
 // declared accounts plus two mandatory trailing buyback slots (the second
 // must be an authorized pump-fees vault; the first is not validated), sell
 // needs its 14 declared accounts only. track_volume (OptionBool) is omitted
-// from buy_exact_sol_in — anchor deserializes the missing byte as None, so
-// no user volume accumulator is created and its rent never applies.
+// from buy_exact_sol_in and anchor deserializes the missing byte as None —
+// but the 2026-10 mainnet program still creates the per-user volume
+// accumulator on first use and charges its rent to the `user` slot
+// (live-verified: tx 4Suz3jfC…, 1_346_200 lamports). That rent is exactly
+// the first-use cost the authority's standing balance exists to bear.
 const ARGS_LEN: usize = 24;
 
 /// The 2026-10 trailing pair, in the order pump validates it: the
@@ -94,8 +100,15 @@ const BUY_ACCOUNTS_LEN: usize = 20;
 // meaning (bonding-curve-v2 + buyback) rather than count.
 const BUY_202610_ACCOUNTS_LEN: usize = BUY_ACCOUNTS_LEN;
 // account_infos handed to the processor: the 18 CPI accounts, then the
-// close/sweep helpers (src program, payer, src)
+// close/refund helpers (src program, payer, src)
 const BUY_PROCESSOR_LEN: usize = 21;
+// pump's per-user volume accumulator in the processor row: its creation
+// rent is charged to the buy's `user` slot (our authority), so its absence
+// is the first-use signal the before-hook checks
+const BUY_USER_VOLUME_ACC_IDX: usize = 13;
+// the coin's creator vault, lazily created on the coin's first-ever buy —
+// the other first-use rent the before-hook gates on
+const BUY_CREATOR_VAULT_IDX: usize = 9;
 
 impl<'info> PumpfunBuyAccounts<'info> {
     fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
@@ -149,14 +162,16 @@ impl<'info> PumpfunBuyAccounts<'info> {
 }
 
 pub struct PumpfunBuyProcessor {
-    pub spendable: u64,
+    /// rent the funding wallet advanced for the disposable wSOL temp (its
+    /// lamports minus the wrapped input this leg spends) — refunded in full
+    /// to the payer after the CPI
+    pub temp_rent: u64,
 }
 
 impl DexProcessor for PumpfunBuyProcessor {
     fn before_invoke(&self, account_infos: &[AccountInfo]) -> Result<u64> {
         let authority = account_infos.get(6).unwrap();
         let src_token_program = account_infos.get(BUY_PROCESSOR_LEN - 3).unwrap();
-        let payer = account_infos.get(BUY_PROCESSOR_LEN - 2).unwrap();
         let source_token_account = account_infos.last().unwrap();
         let before_authority_lamports = authority.lamports();
 
@@ -169,24 +184,24 @@ impl DexProcessor for PumpfunBuyProcessor {
                 source_token_account.key() != wsol_sa::ID,
                 ErrorCode::InvalidSourceTokenAccount
             );
-            // The closed temp carries rent + wrapped input; pump may still
-            // need more than that for its on-first-use rents, so the payer
-            // covers any shortfall up front and the after-hook sweeps the
-            // residue back — net zero for everyone but pump.
-            let needed = self
-                .spendable
-                .checked_add(PUMPFUN_FUND_HEADROOM)
-                .ok_or(ErrorCode::CalculationError)?;
-            let have = before_authority_lamports
-                .checked_add(source_token_account.get_lamports())
-                .ok_or(ErrorCode::CalculationError)?;
-            if have < needed {
-                transfer_sol(
-                    payer.to_account_info(),
-                    authority.to_account_info(),
-                    needed - have,
-                    None,
-                )?;
+            // pump's on-first-use rents — the per-user volume accumulator,
+            // plus the coin's creator vault on its first-ever buy — are
+            // charged to the buy's `user` slot (our PDA) and are borne by
+            // its standing balance, never the payer. Fail fast while any
+            // of them is unborn and the balance can't cover the worst case
+            // (2.4M > 1,346,200 + 890,880): a short authority would
+            // silently spend the temp's refundable rent and abort the
+            // after-hook refund instead.
+            let user_volume_accumulator = account_infos.get(BUY_USER_VOLUME_ACC_IDX).unwrap();
+            let creator_vault = account_infos.get(BUY_CREATOR_VAULT_IDX).unwrap();
+            let first_use_missing = (user_volume_accumulator.lamports() == 0
+                && user_volume_accumulator.data_len() == 0)
+                || (creator_vault.lamports() == 0 && creator_vault.data_len() == 0);
+            if first_use_missing {
+                require!(
+                    before_authority_lamports >= PUMPFUN_FUND_HEADROOM,
+                    ErrorCode::InsufficientFunds
+                );
             }
             close_token_account(
                 source_token_account.to_account_info(),
@@ -219,20 +234,23 @@ impl DexProcessor for PumpfunBuyProcessor {
         let authority = account_infos.get(6).unwrap();
         let payer = account_infos.get(BUY_PROCESSOR_LEN - 2).unwrap();
         if authority.key() == authority_pda::ID {
-            // sweep everything above the rent floor back to the payer,
-            // leaving the PDA rent-exempt for the next swap
-            let drain = authority.lamports().saturating_sub(MIN_SOL_ACCOUNT_RENT);
-            require!(drain <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
-            transfer_sol(
-                authority.to_account_info(),
-                payer.to_account_info(),
-                drain,
-                Some(SA_AUTHORITY_SEED),
-            )?;
-            msg!(
-                "pumpfun buy: authority swept {} lamports back to payer",
-                drain
-            );
+            // refund exactly the rent the funding wallet advanced for the
+            // temp: the wrapped input was consumed by the buy and pump's
+            // on-first-use rents come out of the authority's standing
+            // balance — the payer nets zero on every buy, first or not
+            require!(self.temp_rent <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
+            if self.temp_rent > 0 {
+                transfer_sol(
+                    authority.to_account_info(),
+                    payer.to_account_info(),
+                    self.temp_rent,
+                    Some(SA_AUTHORITY_SEED),
+                )?;
+                msg!(
+                    "pumpfun buy: authority refunded {} lamports of temp rent to payer",
+                    self.temp_rent
+                );
+            }
         }
         Ok(0)
     }
@@ -399,7 +417,15 @@ fn buy_with_layout<'a>(
     let instruction =
         Instruction { program_id: swap_accounts.dex_program_id.key(), accounts, data };
 
-    let dex_processor = &PumpfunBuyProcessor { spendable: amount_in };
+    // the rent advanced for the disposable temp (its lamports minus the
+    // wrapped input this leg spends); the after-hook refunds it in full to
+    // the route payer, so whoever funded the create nets zero
+    let temp_rent = account_infos
+        .last()
+        .unwrap()
+        .lamports()
+        .saturating_sub(amount_in);
+    let dex_processor = &PumpfunBuyProcessor { temp_rent };
     let amount_out = invoke_process(
         amount_in,
         dex_processor,
@@ -735,26 +761,40 @@ fn sell_with_layout<'a>(
 //     an SPL owner check at the debit, no canonicality), so custody and
 //     per-tx temps keep working there.
 //
-// `user` still pays pump's on-first-use rents (volume accumulator + ATAs),
-// so on the PDA the payer pre-funds a headroom and sweeps the residue back
-// after the CPI — the same dance as the native buy, minus the close.
+// `user` still pays pump's on-first-use rents (volume accumulator + quote
+// ATAs for the fee/buyback recipients: 1_346_200 + ~2_039_280 × 2 plus
+// margin ≈ 6M lamports worst case), but the authority's standing balance
+// bears them: no payer top-up, no post-CPI sweep — a deficit is a rent
+// absorbed by design, a surplus (anomaly) is swept back. While the volume
+// accumulator is unborn the before-hook enforces the standing floor
+// (PUMPFUN_V2_FUND_HEADROOM), same fail-fast as the native buy.
 const ARGS_LEN_V2: usize = 24;
 
-pub struct PumpfunV2Processor;
+pub struct PumpfunV2Processor {
+    /// user_volume_accumulator's index in account_infos: the buy and sell
+    /// v2 layouts carry it at different slots (sell has no global
+    /// accumulator), so each leg pins its own
+    pub uva_idx: usize,
+}
 
 impl DexProcessor for PumpfunV2Processor {
     fn before_invoke(&self, account_infos: &[AccountInfo]) -> Result<u64> {
+        // v2 settles in tokens and routes no native value through the
+        // authority; its only native footprint is pump's on-first-use
+        // rents, which the authority's standing balance bears — nothing to
+        // front from the payer, but an unborn accumulator means the worst
+        // case must already be standing or the swap fails fast
         let authority = account_infos.get(V2_AUTHORITY_IDX).unwrap();
         let before_authority_lamports = authority.lamports();
         if authority.key() == authority_pda::ID {
-            if before_authority_lamports < PUMPFUN_V2_FUND_HEADROOM {
-                let payer = account_infos.last().unwrap();
-                transfer_sol(
-                    payer.to_account_info(),
-                    authority.to_account_info(),
-                    PUMPFUN_V2_FUND_HEADROOM - before_authority_lamports,
-                    None,
-                )?;
+            let user_volume_accumulator = account_infos.get(self.uva_idx).unwrap();
+            let accumulator_missing =
+                user_volume_accumulator.lamports() == 0 && user_volume_accumulator.data_len() == 0;
+            if accumulator_missing {
+                require!(
+                    before_authority_lamports >= PUMPFUN_V2_FUND_HEADROOM,
+                    ErrorCode::InsufficientFunds
+                );
             }
         }
         Ok(before_authority_lamports)
@@ -765,11 +805,15 @@ impl DexProcessor for PumpfunV2Processor {
         account_infos: &[AccountInfo],
         _hop: usize,
         _owner_seeds: Option<&[&[&[u8]]]>,
-        _before_authority_lamports: u64,
+        before_authority_lamports: u64,
     ) -> Result<u64> {
         let authority = account_infos.get(V2_AUTHORITY_IDX).unwrap();
         if authority.key() == authority_pda::ID {
-            let drain = authority.lamports().saturating_sub(MIN_SOL_ACCOUNT_RENT);
+            // settle any surplus back to the payer; a deficit is a
+            // first-use rent the authority absorbs by design
+            let drain = authority
+                .lamports()
+                .saturating_sub(before_authority_lamports);
             require!(drain <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
             if drain > 0 {
                 let payer = account_infos.last().unwrap();
@@ -787,6 +831,8 @@ impl DexProcessor for PumpfunV2Processor {
 }
 // account_infos layout: CPI accounts in wire order, payer appended last
 const V2_AUTHORITY_IDX: usize = 13; // `user` slot of both v2 instructions
+const V2_BUY_UVA_IDX: usize = 20; // buy_v2: gva@19, uva@20, assoc-uva@21
+const V2_SELL_UVA_IDX: usize = 19; // sell_v2 layout carries no gva
 
 pub struct PumpfunBuyV2Accounts<'info> {
     pub dex_program_id: &'info AccountInfo<'info>,
@@ -954,7 +1000,7 @@ pub fn buy_v2<'a>(
 
     invoke_process(
         amount_in,
-        &PumpfunV2Processor,
+        &PumpfunV2Processor { uva_idx: V2_BUY_UVA_IDX },
         &account_infos,
         &mut swap_accounts.swap_source_token,
         &mut swap_accounts.swap_destination_token,
@@ -1131,7 +1177,7 @@ pub fn sell_v2<'a>(
 
     invoke_process(
         amount_in,
-        &PumpfunV2Processor,
+        &PumpfunV2Processor { uva_idx: V2_SELL_UVA_IDX },
         &account_infos,
         &mut swap_accounts.swap_source_token,
         &mut swap_accounts.swap_destination_token,
@@ -1259,5 +1305,12 @@ mod tests {
         // processor rows: CPI accounts + helpers (+payer)
         assert_eq!(BUY_PROCESSOR_LEN, 18 + 3); // +src prog, payer, src
         assert_eq!(V2_AUTHORITY_IDX, 13); // `user` slot of both v2 layouts
+        // first-use gate slots: the native buy gates on uva + creator
+        // vault; the v2 legs carry the uva at different indexes (sell_v2
+        // has no global accumulator ahead of it)
+        assert_eq!(BUY_USER_VOLUME_ACC_IDX, 13);
+        assert_eq!(BUY_CREATOR_VAULT_IDX, 9);
+        assert_eq!(V2_BUY_UVA_IDX, 20);
+        assert_eq!(V2_SELL_UVA_IDX, V2_BUY_UVA_IDX - 1);
     }
 }

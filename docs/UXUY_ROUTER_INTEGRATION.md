@@ -95,9 +95,9 @@ uxuy 引擎的路由模型是"单路径、每跳一个最优池、最多 3 跳"�
 ### PumpfunammBuy3 — PumpSwap `buy_exact_quote_in`（23 账户，含 `track_volume=OptionBool{true}` 尾字节）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, pool, global_config, base_mint, quote_mint, pool_base_token_account, pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account, base_token_program, quote_token_program, system_program, associated_token_program, event_authority, coin_creator_vault_ata, coin_creator_vault_authority, global_volume_accumulator, user_volume_accumulator, fee_config, fee_program`
 
-2026-10-20 起带首买租金垫付：`user_volume_accumulator` 是 per-user 账户（种子只含 user；PDA 场景 user 槽即 authority），首建租金 1,346,200 由 pump 向 user 槽收取，而 authority PDA 不持有 lamports。PDA 场景下 before_invoke 在累计器未建（lamports=0 且 data_len=0）时由 payer 预补 `PUMPFUNAMM_FUND_HEADROOM`（6M，2026-10-20 由 2M 提额以覆盖 pump 其他可能的 user 槽首建费用：creator-vault / fee-recipient quote ATA 各约 1,513,840）差额，after_invoke 把 authority 结算回原水平（缺口由 payer 补齐，与 sell 处理器同款；多余扫回 payer 沿曲线买入处理器的模式），钱包净成本=直连 pump 首买。垫付走合约顶层 `payer` 账户，段账户表（上面 23+尾三槽）不变。
+2026-10-21 起首买租金由 authority 常备余额承担：`user_volume_accumulator` 是 per-user 账户（种子只含 user；PDA 场景 user 槽即 authority），首建租金 1,346,200 由 pump 向 user 槽收取。PDA 场景下 before_invoke 在累计器未建（lamports=0 且 data_len=0）时要求 authority 余额 ≥ `PUMPFUNAMM_FUND_HEADROOM`（6M，覆盖 pump 其他可能的 user 槽首建费用：creator-vault / fee-recipient quote ATA 各约 1,513,840），不足报 InsufficientFunds（运维需预置/补充 authority SOL）；after_invoke 只把异常盈余扫回 payer，缺口=租金由 authority 吸收，payer 永不为租金转账（钱包净成本=0）。段账户表（上面 23+尾三槽）不变。
 
-**2026-10-20 实测更新**：pump 程序 2026-10 升级后 `BuyExactQuoteIn` 已不再向 user 槽收首建租金（测试网 live simulate：accumulator 未出生 + authority 0 lamports 直接成交，日志无任何租金事件；SOL→PAID 单跳与 USDC→SOL→PAID 三跳全绿）。垫付保留为防御性逻辑（若 pump 恢复收费即自动生效），稳态零开销。
+**2026-10-20 实测更新**：pump 程序 2026-10 升级后 `BuyExactQuoteIn` 已不再向 user 槽收首建租金（测试网 live simulate：accumulator 未出生 + authority 0 lamports 直接成交，日志无任何租金事件；SOL→PAID 单跳与 USDC→SOL→PAID 三跳全绿）。余额要求保留为防御性闸门（若 pump 恢复收费，常备余额直接吸收）。
 
 ### PumpfunammSell3 — PumpSwap `sell`（21 账户）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token, pool, global_config, base_mint, quote_mint, pool_base_token_account, pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account, base_token_program, quote_token_program, system_program, associated_token_program, event_authority, coin_creator_vault_ata, coin_creator_vault_authority, fee_config, fee_program`
@@ -105,7 +105,7 @@ uxuy 引擎的路由模型是"单路径、每跳一个最优池、最多 3 跳"�
 ### PumpfunBuy — pump.fun 曲线 `buy_exact_sol_in`（20 账户，2026-10 新增，ordinal 15）
 `dex_program_id, swap_authority_pubkey, swap_source_token（一次性 wSOL 临时，会被 close）, swap_destination_token, global, fee_recipient, mint, bonding_curve, associated_bonding_curve, system_program, src_token_program（SPL，close 用）, base_token_program（曲线币，常为 Token-2022）, creator_vault, event_authority, global_volume_accumulator, user_volume_accumulator, fee_config, fee_program, buyback_a, buyback_b`
 
-原生 SOL 桥接：before_invoke 把 src wSOL 临时账户 close 进 authority（PDA 场景 payer 预补租金差额），CPI 以 `spendable_sol_in=amount_in, min_tokens_out=1, track_volume 缺省（None，不建用户量累计器）` 执行，after_invoke 把 authority 高于租金下限的部分扫回 payer。buyback 双尾槽是 2026-10 程序强制要求（第二槽须授权金库；两个槽都传 5YxQFdt…，主网模拟已证）。fee_recipient 钉死 pump 默认 7VtfL8…（按币授权：自设分润的币拒收，路由换次优）。
+原生 SOL 桥接：before_invoke 把 src wSOL 临时账户 close 进 authority，CPI 以 `spendable_sol_in=amount_in, min_tokens_out=1, track_volume 缺省 None` 执行，after_invoke 把临时账户垫付租金**原额**退给路由 payer（出资方=同一用户钱包，净零）。首买租金由 authority 常备余额承担：`track_volume=None` 并不阻止 2026-10 程序建 per-user 累计器（主网实勘 4Suz3jfC…：累计器被创建并向 user 槽收 1,346,200），故累计器或 creator_vault（新币首买 890,880）任一未建时 before_invoke 要求 authority ≥ `PUMPFUN_FUND_HEADROOM`（2.4M，覆盖两者合计 2,237,080；运维预置），不足报 InsufficientFunds；CPI 实收租金从 authority 扣减、事后不向 payer 追偿。buyback 双尾槽是 2026-10 程序强制要求（第二槽须授权金库；两个槽都传 5YxQFdt…，主网模拟已证）。fee_recipient 钉死 pump 默认 7VtfL8…（按币授权：自设分润的币拒收，路由换次优）。
 
 ### PumpfunSell — pump.fun 曲线 `sell`（16 账户，2026-10 新增，ordinal 16）
 `dex_program_id, swap_authority_pubkey, swap_source_token, swap_destination_token（wSOL）, global, fee_recipient, mint, bonding_curve, associated_bonding_curve, system_program, creator_vault, base_token_program, wsol_program（SPL，wrap 用）, event_authority, fee_config, fee_program`
@@ -115,7 +115,7 @@ CPI 以 `amount, min_sol_output=1` 执行（无尾部账户），after_invoke �
 ### PumpfunBuyV2 — pump.fun 曲线 `buy_exact_quote_in_v2`（28 账户，2026-10 新增，ordinal 17）
 `dex_program_id, swap_authority_pubkey, swap_source_token（canonical ATA(authority, quote)——pump 校验）, swap_destination_token（base 出账，仅校验 owner）, global, base_mint, quote_mint, base_token_program, quote_token_program, associated_token_program, fee_recipient, associated_quote_fee_recipient, buyback_fee_recipient, associated_quote_buyback_fee_recipient, bonding_curve, associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault, associated_creator_vault, sharing_config, global_volume_accumulator, user_volume_accumulator, associated_user_volume_accumulator, fee_config, fee_program, system_program, event_authority, program`
 
-v2 代币结算：quote 侧走 token 账户（USDC/USDT 曲线，或 wSOL 包装路径——legacy System-quote 曲线也接受 wSOL，链上实证）。无原生 SOL 桥接；PDA 场景 payer 预补 6M 租金余量（uva+其 quote ATA+creator-vault ATA 首建）事后扫回。args = (spendable_quote_in=amount_in, min_tokens_out=1)，无尾部账户（buyback 对是声明账户，官方 7VtfL8/5YxQFdt 已模拟验证授权）。
+v2 代币结算：quote 侧走 token 账户（USDC/USDT 曲线，或 wSOL 包装路径——legacy System-quote 曲线也接受 wSOL，链上实证）。无原生 SOL 桥接；首建租金（uva+其 quote ATA+creator-vault ATA，最坏 ~6M）由 authority 常备余额承担：无 payer 垫付/扫回，uva 未建时链上强制 ≥ `PUMPFUN_V2_FUND_HEADROOM`（6M），缺口=租金由 authority 吸收，异常盈余扫回 payer。args = (spendable_quote_in=amount_in, min_tokens_out=1)，无尾部账户（buyback 对是声明账户，官方 7VtfL8/5YxQFdt 已模拟验证授权）。
 
 ### PumpfunSellV2 — pump.fun 曲线 `sell_v2`（27 账户，2026-10 新增，ordinal 18）
 同 buy_v2 布局减 global_volume_accumulator。`swap_source_token`（base 入账，仅校验 owner）→ `swap_destination_token`（canonical ATA(authority, quote)）。args = (amount, min_quote_out=1)。**形状约束（compose 强制）**：quote 目的地是 hop authority 的 canonical ATA —— v2 sell 只能是 hop0 末跳无 receiver，或中间跳（hop≥1 末跳禁止：PDA 的 ATA ≠ 用户收款账户）。
@@ -165,6 +165,7 @@ anchor deploy --provider.cluster mainnet  # upgrade authority 建议用 Squads �
 
 - 交易组装保持 v1-only（SIMD-0385）可行（单条 router 指令账户数大幅下降）；ALT 作为二期优化；
 - `simulate:true` 闸门照旧保留，验收标准 = simulate 的 token balance 变化与旧纯指令路径逐字段对拍；
+- **authority PDA 常备 SOL 水位（2026-10-21 起）**：pump 首买租金由 authority 常备余额承担——曲线累计器/creator-vault 未建时链上强制 ≥ `PUMPFUN_FUND_HEADROOM`（2.4M），AMM 闸门 ≥ `PUMPFUNAMM_FUND_HEADROOM`（6M），v2 闸门同 6M（uva 未建时）。部署/升级后向 authority PDA 转 ≥ 0.01 SOL 并监控（每次 pump 首建租事件扣减一次），低于水位前对应 pump 路径会以 InsufficientFunds 拒单；
 - 上线顺序建议：devnet e2e → mainnet 小额灰度（按 API key）→ 全量；
 - 本仓库相对上游的变更（裁剪 50 个 adapter、换 seed/ID、地址模块改为 `from_str_const`）属于审计增量范围，主网前补一轮审计。
 
@@ -198,7 +199,7 @@ Raydium v4/CPMM/CLMM 无链上 IDL 账户，改用 `uxuyprotocol/solanaswap` 生
 
 **Go 侧路由现状（2026-10-10，uxuyprotocol/dex @ uxuy-router）**：上表是合约 adapter 与链上 IDL 的对齐结论；Go 引擎目前仅将 Whirlpool/RaydiumCLMM/Pancake/CPMM/DLMM/RaydiumV2 六个变体路由上链——PumpSwap（链上程序现要求尾部 buyback 账户，合约 adapter 未携带）与 Byreal（动态费池拒绝 `swap_v2`，需要 `swap_v3_dyn`+稀疏 tick+pyth）虽在合约枚举中，仍走旧纯指令路径，待合约 adapter 补齐后放行。
 
-**临时账户创建方式**：中间跳账户由 Go 侧直接用 `System.CreateAccountWithSeed`（base=用户钱包）+ `InitializeAccount3(owner=authority PDA)` 创建——`InitializeAccount3` 的 owner 只是参数、无需程序签名；合约的 `create_token_account(_with_seed)` 指令硬约束 wSOL mint（见其 `token_mint` 约束），通用 mint 走不了，两者并存各有用途。
+**临时账户创建方式**：中间跳账户由 Go 侧直接用 `System.CreateAccountWithSeed`（base=用户钱包）+ `InitializeAccount3(owner=authority PDA)` 创建——`InitializeAccount3` 的 owner 只是参数、无需程序签名；合约的 `create_token_account(_with_seed)` 指令硬约束 wSOL mint（见其 `token_mint` 约束），通用 mint 走不了，两者并存各有用途。出资方（2026-10-21 起）：pump 曲线买入的 wSOL 临时账户由**用户钱包**出资（合约 after_invoke 把租金原额退给路由 payer=同一钱包，净零）；其余中间 temp 仍由 fee payer 出资（租金滞留为平台成本，靠 custody 预热消除）。
 
 ## 10. PumpSwap 尾部账户与 Byreal swap_v3_dyn —— 已实现并主网验证（2026-10-13）
 

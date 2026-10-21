@@ -251,10 +251,14 @@ pub mod pumpfun_program {
     pub fn id() -> Pubkey { ID }
 }
 
-// Headroom the pump.fun curve buy keeps available on the swap authority on
-// top of the spend itself: pump may idempotently create the curve's creator
-// vault (rent.minimum_balance(0) = 890_880) and the user volume accumulator
-// (rent 1_346_280 observed on chain) from the `user` account. Fees ride
+// Minimum standing lamports the swap authority must hold for a pump.fun
+// curve buy while any first-use account is unborn — the per-user volume
+// accumulator (rent 1_346_200 observed on chain, tx 4Suz3jfC… 2026-10-21)
+// or the coin's creator vault on its first-ever buy
+// (rent.minimum_balance(0) = 890_880); both together (2_237_080) stay
+// under this bound. The authority's standing balance bears these rents —
+// the payer is never charged — so ops seeds the PDA at least this high
+// (curve plus v2/AMM worst case; see PUMPFUNAMM_FUND_HEADROOM). Fees ride
 // inside spendable_sol_in (net-of-fee formula), so rents are the only
 // extra native cost.
 pub const PUMPFUN_FUND_HEADROOM: u64 = 2_400_000;
@@ -264,22 +268,25 @@ pub const PUMPFUN_FUND_HEADROOM: u64 = 2_400_000;
 pub const PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR: &[u8; 8] = &[194, 171, 28, 70, 104, 77, 91, 47];
 pub const PUMPFUN_SELL_V2_SELECTOR: &[u8; 8] = &[93, 246, 130, 60, 231, 233, 64, 178];
 
-// v2 first-use rents charged from `user` (authority): user volume
-// accumulator (1,346,280) + its quote ATA (~2,039,280) + the curve's
-// creator-vault quote ATA (~2,039,280) plus margin.
+// v2 first-use rents are borne by the authority's standing balance too (no
+// per-swap front or sweep). While the volume accumulator is unborn the v2
+// before-hook ENFORCES this as the standing floor (InsufficientFunds
+// below it); it covers the worst-case rent chain — user volume accumulator
+// (1_346_200) + its quote ATA (~2_039_280) + the curve's creator-vault
+// quote ATA (~2_039_280) plus margin.
 pub const PUMPFUN_V2_FUND_HEADROOM: u64 = 6_000_000;
 
-// Headroom the pump AMM (pumpswap) buy fronts on the swap authority when the
-// per-user volume accumulator is still unborn: buy_exact_quote_in used to
-// create it from the `user` slot (rent 1_346_200 observed on chain, test net
-// sim 2026-10-16; the account is per-USER, seed carries no pool, so the
-// charge happened once ever per authority). 2026-10-20 the upgraded pump
-// program no longer charges that rent on BuyExactQuoteIn (live sim green
-// with an unborn accumulator and a zero-lamport authority), so the front is
-// defensive now: sized to also cover the program's other possible first-use
-// charges from the `user` slot (creator-vault / fee-recipient quote ATAs,
-// ~1_513_840 each, T22 ATA rent observed 2026-10-16). Everything unspent is
-// swept back to the payer in the after-hook (drain guarded by
-// SOL_DIFF_LIMIT, which this stays below), so this caps only the transient
-// front and costs nothing in the steady state.
+// Minimum standing lamports the pump AMM (pumpswap) buy requires on the
+// swap authority while the per-user volume accumulator is still unborn:
+// buy_exact_quote_in used to create it from the `user` slot (rent
+// 1_346_200 observed on chain, test net sim 2026-10-16; the account is
+// per-USER, seed carries no pool, so the charge happened once ever per
+// authority). 2026-10-20 the upgraded pump program no longer charges that
+// rent on BuyExactQuoteIn (live sim green with an unborn accumulator and a
+// zero-lamport authority), so the requirement is defensive now: sized to
+// also cover the program's other possible first-use charges from the
+// `user` slot (creator-vault / fee-recipient quote ATAs, ~1_513_840 each,
+// T22 ATA rent observed 2026-10-16). The authority's standing balance
+// bears whatever does get charged — the payer is never asked to front or
+// reimburse anything.
 pub const PUMPFUNAMM_FUND_HEADROOM: u64 = 6_000_000;
