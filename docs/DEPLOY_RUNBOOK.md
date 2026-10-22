@@ -28,6 +28,7 @@
 | 热修部署件（opt-s，第一版） | `target/deploy/rollback/fafecf4-hotfix-654824.so` | 654,824 | `61be408bc66a5227a723825b397f2effb4f3e61f5c109efffb207210bd2fa26a` |
 | **热修部署件（opt-z，推荐）** | `target/deploy/rollback/optz-hotfix-598104.so` | **598,104** | `aa0cbee7eaed661bdf4a545b85a4d16a83adf7e4de5fa40be4212b13c112dd66` |
 | **合并版部署件（phase-2 + 修复，opt-z）** | `target/deploy/rollback/uxuy-router-optz-617296.so` | **617,296** | `e55bbf657f78c35e05cc4a73237563aa10f14dfc467d5b437f2dbcaea62747a1` |
+| CU 回退候选（opt-s 合并版） | `target/deploy/rollback/uxuy-router-opts-677416.so` | 677,416 | `cf47d32f6d14256f1b9fd3391a35544e99e8bd158d2d6f299f2222ed9ad05d65` |
 | devnet 现状（**无法作为回滚件**，见 §5） | `target/deploy/rollback/devnet-prev-848120.so` | 848,120 | `4e2cef99…`（与 devnet 链上 UNKNOWN 不匹配） |
 
 构建配方（必须 v1.58、sbpfv2、strip；sbpfv3 会被集群拒收）：
