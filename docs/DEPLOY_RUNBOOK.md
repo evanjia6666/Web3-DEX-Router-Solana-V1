@@ -135,4 +135,9 @@ ATA 三 seed、v2 token 差额转发、claim 水位、ToB 退款、空路由/tri
 | 环境 | 时间 (CST) | 版本 | 部署件 | 字节 | sha256 | 结果 |
 |---|---|---|---|---|---|---|
 | devnet | 2026-10-22 18:1x | `uxuy-router` @ `b37992b` | `uxuy-router-optz-617296.so` | 617,296 | `e55bbf65…47a1` | 已升级，字节校验 MATCH；slot 513,850,011；sig `3hrPnLfV21EL…UTNE`；升级前字节已归档 |
-| mainnet | 待定（与 gdex 同窗口） | 同上 | 同上 | 617,296 | `e55bbf65…47a1` | 待执行 |
+| mainnet | 2026-10-22 18:3x | 同上 | 同上 | 617,296 | `e55bbf65…47a1` | **已升级**，字节校验 MATCH；slot 460,000,401；sig `2T7TAryMLhXF…mpy` |
+
+> ⚠️ 主网升级必须带 `--max-len 617296`：不带时 CLI 会按 ProgramData 现有容量（834,792 B）分配 buffer，
+> 需要 5.811 SOL，付费账户只有 4.646，部署会在 `Account allocation failed` 处失败（buffer 未创建、不扣款）。
+> 带上后 buffer = 617,296 B（4.297 SOL），升级完成后原路退回，实际只花手续费 ~0.0068 SOL。
+> ProgramData 容量保持 834,792（不回收），尾部 217,496 B 为零填充。
