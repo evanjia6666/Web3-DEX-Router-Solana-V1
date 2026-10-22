@@ -210,3 +210,15 @@ Raydium v4/CPMM/CLMM 无链上 IDL 账户，改用 `uxuyprotocol/solanaswap` 生
 **Byreal `swap_v3_dyn`（按流量占比决定）**。动态费池对 `swap_v2` 报 6048 SwapDynamicFeeEnabled；`swap_v3_dyn` disc `e52ed584692828e4`，13 核心账户 + 尾部 `[bitmap(readonly), 4 个存在性探测的稀疏 tick array（writable, 按行走方向）, dyn-fee 池再追 token0/token1 pyth oracle（readonly）]`（dex 仓库 `instr/byreal.go` 全部现成）。补丁要点：变体拆 `ByrealClmm3Dyn`（尾部追加式枚举，序号 15 起），tick 段长度可变——需要 Go 侧按探测结果拼段 + adapter 按剩余账户里非零地址消费。
 
 **已上线**：合约 `de71a19`（两网，.so 659,760B）+ dex `94a9989`。主网 simulate 三形态全绿：byreal 动态费（9GTj99…，pyth oracle 对）、byreal 标准费（87pbGHxi… wSOL/Bybit 深池，原生 SOL 入含 wrap+sync）、pump buy（12x41vhk…，尾部三件套、pool_v2 占位跳过）。实现要点：段与适配器槽位一一对应（适配器复用段槽 [0] 作为 CPI 程序 ID meta，段核心 19 槽，多插一个程序 ID 槽会整体错位）；buy 的 `global_volume_accumulator` 必须 WRITABLE（适配器 CPI 要求，legacy 直调时 readonly 能过是因为权限检查发生在 CPI 边界）；creator-set 泵池当前主网 40/40 全为 T2022 base，被 MintsAllSPL 闸门排除，pool_v2 实槽路径按构造覆盖。
+
+## 11. 平台费与 Token-2022（2026-10-22）
+
+**router 模式的费不经合约**：`swap` / `swap_tob_v3_with_receiver` 入口恒以 `platform_fee_rate=0` 调用，平台费由 Go 侧 `router.Compose` 拼成**顶层指令**挂在链尾（钱包签名）。因此费腿的 Token-2022 支持是纯 Go 侧改动（dex 仓库 `router/compose.go` + `instr/platformfee.go`），合约无需升级：
+
+- 费 mint 事实（属主程序/decimals/transfer-fee 配置/transfer hook）由 RPC 层 `instr.ResolveFeeMint` 解析并进程内缓存，随 `PlatformFee.Facts` 进入 Compose；缺 Facts 的费是具名错误，绝不静默按 SPL 猜。
+- ATA 派生/幂等创建按 mint **属主程序**走（SPL 与 T2022 同一 API，种子含程序 id）；与路由边缘账户同 mint 同 owner 时复用、至多补一个 create。
+- 转账形状：SPL=裸 `Transfer`；T2022 恒 `TransferChecked`（带费配置的 mint 用 `TransferCheckedWithFee` 携带按 epoch 计价的费用），active hook 时按 ExtraAccountMetaList 解析并追加 Execute 附加账户。
+- T2022 费 mint 带 memo 时，费转账前**紧贴**第二条 memo 指令（memo-transfer 扩展只认紧邻前一条）。
+- 仍回退（`ErrFallback`，具名报错）：中间跳 T2022 mint；wrap/unwrap 链上钱包付 wSOL 费；native-out 链上的 wSOL 费触及已被 close 的账户。
+
+**合约自身费路径（`swap_v3` 系 `platform_fee_rate`，当前 router 模式未启用）本就 Token-2022 就绪**：`transfer_token_fee` → `transfer_token` 恒 `token_2022::transfer_checked` 且程序槽透传（`source/destination_token_program` 为 `Interface<TokenInterface>`），费账户经 `associate_convert_token_account`（`InterfaceAccount`，扩展感知）。`utils/token.rs` 单测 `test_associate_convert_token_account_accepts_t2022_shapes` 钉死三种链上形状（纯 SPL 165B / 无扩展 T2022 / 带 TransferFeeAmount 扩展 >165B）都可反序列化——防止未来把费账户改回 165-exact 反序列化时悄悄砖死 T2022 收费。

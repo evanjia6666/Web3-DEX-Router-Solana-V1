@@ -343,6 +343,11 @@ pub fn is_system_account(account: &AccountInfo) -> bool {
 mod tests {
     use super::*;
     use crate::constants::{authority_pda, wsol_program, wsol_sa};
+    use anchor_spl::token_2022::spl_token_2022::extension::{
+        transfer_fee::TransferFeeAmount, BaseStateWithExtensionsMut, ExtensionType,
+        StateWithExtensionsMut,
+    };
+    use anchor_spl::token_2022::spl_token_2022::state::{Account, AccountState};
 
     // The ATA derivation carries THREE seeds (wallet, token program, mint).
     // Pinned against the checked-in wsol_sa constant so the two-seed derive
@@ -381,5 +386,95 @@ mod tests {
             0,
         );
         assert_eq!(token_account_amount(&ai).unwrap(), 1_234_567);
+    }
+
+    // The platform-fee path reinterprets caller-supplied fee accounts
+    // through associate_convert_token_account before transfer_token_fee
+    // debits them: pin that every on-chain account shape deserializes —
+    // plain SPL, extension-less Token-2022 (pump-style mints), and
+    // Token-2022 grown past 165 bytes by the TransferFeeAmount extension
+    // (fee-bearing mints). A 165-exact-only deserializer would reject the
+    // extended fee account and brick Token-2022 fee collection.
+    #[test]
+    pub fn test_associate_convert_token_account_accepts_t2022_shapes() {
+        // plain SPL (165 exact): mint 0..32, owner 32..64, amount 64..72,
+        // state byte 108 = Initialized
+        {
+            let key = Pubkey::new_unique();
+            let owner = anchor_spl::token::Token::id();
+            let mut lamports = 0u64;
+            let mut data = vec![0u8; 165];
+            data[64..72].copy_from_slice(&1_111u64.to_le_bytes());
+            data[108] = AccountState::Initialized as u8;
+            let mut binding = &mut data[..];
+            let ai = AccountInfo::new(
+                &key,
+                false,
+                true,
+                &mut lamports,
+                &mut binding,
+                &owner,
+                false,
+                0,
+            );
+            assert_eq!(associate_convert_token_account(&ai).unwrap().amount, 1_111);
+        }
+
+        // Token-2022 without extensions: same base layout under Token-2022
+        {
+            let key = Pubkey::new_unique();
+            let owner = anchor_spl::token_2022::Token2022::id();
+            let mut lamports = 0u64;
+            let mut data = vec![0u8; 165];
+            data[64..72].copy_from_slice(&2_222u64.to_le_bytes());
+            data[108] = AccountState::Initialized as u8;
+            let mut binding = &mut data[..];
+            let ai = AccountInfo::new(
+                &key,
+                false,
+                true,
+                &mut lamports,
+                &mut binding,
+                &owner,
+                false,
+                0,
+            );
+            assert_eq!(associate_convert_token_account(&ai).unwrap().amount, 2_222);
+        }
+
+        // Token-2022 with the TransferFeeAmount extension: the account data
+        // grows past 165 — the exact shape a fee-bearing mint's ATAs carry
+        let len = ExtensionType::try_calculate_account_len::<Account>(&[
+            ExtensionType::TransferFeeAmount,
+        ])
+        .unwrap();
+        let mut extended = vec![0u8; len];
+        {
+            let mut state = StateWithExtensionsMut::<Account>::unpack_uninitialized(&mut extended)
+                .unwrap();
+            state.init_extension::<TransferFeeAmount>(true).unwrap();
+            state.base.amount = 3_333;
+            state.base.state = AccountState::Initialized;
+            state.pack_base();
+            state.init_account_type().unwrap();
+        }
+        assert!(len > 165, "extended account must grow past the base len");
+        {
+            let key = Pubkey::new_unique();
+            let owner = anchor_spl::token_2022::Token2022::id();
+            let mut lamports = 0u64;
+            let mut binding = &mut extended[..];
+            let ai = AccountInfo::new(
+                &key,
+                false,
+                true,
+                &mut lamports,
+                &mut binding,
+                &owner,
+                false,
+                0,
+            );
+            assert_eq!(associate_convert_token_account(&ai).unwrap().amount, 3_333);
+        }
     }
 }
