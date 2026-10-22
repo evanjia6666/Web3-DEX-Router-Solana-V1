@@ -1,5 +1,9 @@
-809816
+818248
 # uxuy_router.so @ sbpfv3, platform-tools v1.58 (rustc 1.95.0-dev), HEAD local
+# (deepseek review fixes: proxy deposit delta check, hop0 temp must hold
+# amount_in, ATA three-seed derives, v2 forward by token amount, create
+# idempotency by SPL state, claim reserve, ToB pre-existing WSOL refund,
+# unconditional hop0 allowlist, empty-route/trim guards; +8,432 B vs 809,816)
 # (deepseek review 加固: allocate+assign 抗抢注、hop0_temp_pda 去重、sink 派生锁、sweep 移除; −9,104 B vs 818,920)
 # (phase-2 P2-1/P2-3: create_pump_hop0_temp instruction + hop0 source
 # verification (PDA ["pump-hop0", payer]) + AMM cashback-sink trailing slot

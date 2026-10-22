@@ -442,6 +442,10 @@ fn execute_swap<'info>(
     // Level 1 split handling
     for (_i, hops) in routes.iter().enumerate() {
         require!(hops.len() <= MAX_HOPS, ErrorCode::TooManyHops);
+        // an empty hop list would make the whole swap a no-op that still
+        // returns success (and can emit a CPI fee event with a made-up
+        // amount_in) — reject it
+        require!(!hops.is_empty(), ErrorCode::EmptyRoute);
         let mut amount_in = actual_amount_in; // single-path: the whole amount rides routes[0]
 
         // Multi-hop handling

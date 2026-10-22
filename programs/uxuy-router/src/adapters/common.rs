@@ -146,13 +146,14 @@ pub fn invoke_process<'info>(
     // before invoke hook
     let before_sa_authority_lamports = dex_processor.before_invoke(account_infos)?;
 
-    // Harden: prevent CPI from touching unexpected SA-owned token accounts
-    if proxy_swap || hop > 0 {
-        enforce_sa_token_allowlist(
-            account_infos,
-            &[swap_source_token.key(), swap_destination_token.key()],
-        )?;
-    }
+    // Harden: prevent CPI from touching unexpected SA-owned token accounts.
+    // Unconditional (hop0 included): the route builder is permissionless, so
+    // a hop0 window must not be able to smuggle extra PDA-owned accounts
+    // into a DEX CPI either.
+    enforce_sa_token_allowlist(
+        account_infos,
+        &[swap_source_token.key(), swap_destination_token.key()],
+    )?;
 
     // execute instruction
     execute_instruction(&instruction, account_infos, proxy_swap, hop, owner_seeds)?;
@@ -206,12 +207,10 @@ pub fn invoke_processes<'info>(
 
     // execute instructions
     for i in 0..instructions.len() {
-        if proxy_swap || hop > 0 {
-            enforce_sa_token_allowlist(
-                account_infos_arr[i],
-                &[swap_source_token.key(), swap_destination_token.key()],
-            )?;
-        }
+        enforce_sa_token_allowlist(
+            account_infos_arr[i],
+            &[swap_source_token.key(), swap_destination_token.key()],
+        )?;
         execute_instruction(&instructions[i], account_infos_arr[i], proxy_swap, hop, owner_seeds)?;
     }
 

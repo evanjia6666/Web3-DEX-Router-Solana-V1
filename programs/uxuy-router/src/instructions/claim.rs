@@ -87,8 +87,11 @@ pub fn claim_handler<'a>(ctx: Context<'_, '_, 'a, 'a, ClaimAccounts<'a>>) -> Res
 
 /// Handle SOL claim logic
 fn handle_sol_claim<'a>(ctx: &Context<'_, '_, 'a, 'a, ClaimAccounts<'a>>) -> Result<()> {
+    // never sweep the authority below the pump first-use gates: a claim
+    // that left only the account rent would disable every pump route
+    // until ops re-seeded the PDA
     require!(
-        ctx.accounts.sa_authority.lamports() > MIN_SOL_ACCOUNT_RENT,
+        ctx.accounts.sa_authority.lamports() > CLAIM_SOL_RESERVE,
         ErrorCode::InsufficientFunds
     );
 
@@ -96,7 +99,7 @@ fn handle_sol_claim<'a>(ctx: &Context<'_, '_, 'a, 'a, ClaimAccounts<'a>>) -> Res
         .accounts
         .sa_authority
         .lamports()
-        .checked_sub(MIN_SOL_ACCOUNT_RENT)
+        .checked_sub(CLAIM_SOL_RESERVE)
         .ok_or(ErrorCode::InsufficientFunds)?;
 
     // Record balances before transfer

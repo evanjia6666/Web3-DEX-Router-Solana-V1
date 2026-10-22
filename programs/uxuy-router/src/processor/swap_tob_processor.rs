@@ -141,7 +141,17 @@ impl SwapToBProcessor {
             )?;
         }
 
-        // Unwrap wsol to sa_authority
+        // Unwrap wsol to sa_authority. The close sweeps the account's WHOLE
+        // balance (rent + this route's output + anything the account held
+        // before), so measure it and hand the pre-existing part straight
+        // back to the payer — transfer_to_user only refunds output + rent,
+        // which used to leave the user's prior WSOL stranded on the PDA.
+        let closed_lamports = destination_token_account.to_account_info().lamports();
+        let rent = Rent::get()?
+            .minimum_balance(destination_token_account.to_account_info().data_len());
+        let pre_existing = closed_lamports
+            .saturating_sub(rent)
+            .saturating_sub(amount_out);
         close_token_account(
             destination_token_account.to_account_info(),
             sa_authority.to_account_info(),
@@ -149,6 +159,14 @@ impl SwapToBProcessor {
             destination_token_program.to_account_info(),
             None,
         )?;
+        if pre_existing > 0 {
+            transfer_sol(
+                sa_authority.to_account_info(),
+                payer.to_account_info(),
+                pre_existing,
+                Some(SA_AUTHORITY_SEED),
+            )?;
+        }
         Ok(())
     }
 

@@ -290,3 +290,14 @@ pub const PUMPFUN_V2_FUND_HEADROOM: u64 = 6_000_000;
 // bears whatever does get charged — the payer is never asked to front or
 // reimburse anything.
 pub const PUMPFUNAMM_FUND_HEADROOM: u64 = 6_000_000;
+
+// Standing SOL `claim` must leave on the authority PDA. The claim used to
+// sweep down to MIN_SOL_ACCOUNT_RENT (890_880), which is BELOW every pump
+// first-use gate — a routine fee claim would therefore silently disable
+// the pump routes until ops topped the PDA up again. The reserve is the
+// largest first-use gate, so a claim can never take the authority below it.
+pub const CLAIM_SOL_RESERVE: u64 = if MIN_SOL_ACCOUNT_RENT > PUMPFUNAMM_FUND_HEADROOM {
+    MIN_SOL_ACCOUNT_RENT
+} else {
+    PUMPFUNAMM_FUND_HEADROOM
+};

@@ -77,6 +77,9 @@ pub fn swap_tob_handler<'a>(
     );
 
     let trim_account = if trim_rate.is_some() && trim_rate.unwrap() > 0 {
+        // trailing slot: reject a short account list cleanly instead of
+        // panicking on the index arithmetic
+        require!(!ctx.remaining_accounts.is_empty(), ErrorCode::InvalidAccountsLength);
         Some(&ctx.remaining_accounts[ctx.remaining_accounts.len() - 1])
     } else {
         None
@@ -268,6 +271,9 @@ pub fn swap_tob_specified_receiver_handler<'a>(
     );
 
     let trim_account = if trim_rate.is_some() && trim_rate.unwrap() > 0 {
+        // trailing slot: reject a short account list cleanly instead of
+        // panicking on the index arithmetic
+        require!(!ctx.remaining_accounts.is_empty(), ErrorCode::InvalidAccountsLength);
         Some(&ctx.remaining_accounts[ctx.remaining_accounts.len() - 1])
     } else {
         None
@@ -344,6 +350,7 @@ pub fn swap_tob_enhanced_handler<'a>(
     );
     require!(trim_rate > 0 && charge_rate > 0, ErrorCode::InvalidTrimRate);
 
+    require!(ctx.remaining_accounts.len() >= 2, ErrorCode::InvalidAccountsLength);
     let trim_account = &ctx.remaining_accounts[ctx.remaining_accounts.len() - 2];
     let charge_account = &ctx.remaining_accounts[ctx.remaining_accounts.len() - 1];
 
