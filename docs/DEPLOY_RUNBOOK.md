@@ -152,3 +152,13 @@ ATA 三 seed、v2 token 差额转发、claim 水位、ToB 退款、空路由/tri
 - **尚未观测到端到端 swap**：`getSignaturesForAddress(router)` 最后一条在 18:24，
   升级后 5 分钟观察窗内零路由交易（该程序近期日均仅个位数交易）。
   真正的 wire 兼容性要等第一笔真实成交才能确认。
+
+### 主网实盘验证：pump.fun 曲线 buy + sell（2026-10-22 19:15）
+
+| 方向 | 交易 | slot | CU | 链上日志要点 |
+|---|---|---|---|---|
+| BUY 0.01 SOL → Adam | `jur4V2zrei57TnZ7piYyuZVC16i9iHB5r525wJq8UHzzyEdWY3h2z55FYJucaA4KGgtckgtEG9CgFzR2fBmqUD2` | 460,012,263 | 204,023 | `CreatePumpHop0Temp`（temp 归 authority PDA）→ `Dex::PumpfunBuy202610` → `BuyExactSolIn` → 退租 1,488,440 → 实收 107,717,925,720 |
+| SELL 全部 → native | `2aE4wdKeMFta6bVEi7Fu9sz2JcBuv67MbLEwMkwTsLrbcPTpuN42gEazJgpQPANukEqbQ6EJmsE6FmP2Wc4e3tAF` | 460,012,291 | 113,157 | `Dex::PumpfunSell202610`（源=用户 ATA——曲线 sell 合约不要求 PDA temp）→ 实收 9,778,108 lamports |
+
+钱包净变化 −0.000257 SOL（往返曲线费 ~2.2%）。两笔均 `finalized`、无错误；
+预执行门限（simulate）与实际成交一致。
