@@ -305,6 +305,7 @@ const BUY_USER_VOLUME_ACC_IDX: usize = 20;
 const BUY_SRC_IDX: usize = 6;
 const BUY_DST_IDX: usize = 5;
 const BUY_QUOTE_TOKEN_PROGRAM_IDX: usize = 12;
+const BUY_QUOTE_MINT_IDX: usize = 4;
 
 impl<'info> PumpfunammBuyAccounts3<'info> {
     fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
@@ -394,6 +395,17 @@ impl DexProcessor for PumpfunammBuyProcessor {
                 ErrorCode::InsufficientFunds
             );
         }
+        // the cashback sink must be exactly the uva's quote-mint ATA (the
+        // address pump credits): lock the derivation so a crafted route
+        // cannot point some other PDA-owned account at the slot
+        let sink = account_infos.get(account_infos.len() - 2).unwrap();
+        let uva_key = account_infos.get(BUY_USER_VOLUME_ACC_IDX).unwrap().key();
+        let quote_mint = account_infos.get(BUY_QUOTE_MINT_IDX).unwrap().key();
+        let (expected_sink, _) = Pubkey::find_program_address(
+            &[uva_key.as_ref(), quote_mint.as_ref()],
+            &anchor_spl::associated_token::ID,
+        );
+        require_keys_eq!(sink.key(), expected_sink, ErrorCode::InvalidHopAccounts);
         // defense in depth (the route builder is permissionless): no
         // PDA-owned token account may ride this CPI outside the hop's
         // declared source/destination slots
@@ -502,13 +514,9 @@ pub fn buy3<'a>(
     // never match the derivation, killing the permissionless-route
     // "custody as source" vector. hop >= 1 keeps custody/temp sources.
     if hop == 0 {
-        let (expected_temp, _bump) = Pubkey::find_program_address(
-            &[b"pump-hop0", payer.unwrap().key().as_ref()],
-            &crate::ID,
-        );
-        require_keys_eq!(
+                require_keys_eq!(
             swap_accounts.swap_source_token.key(),
-            expected_temp,
+            crate::adapters::pumpfun::hop0_temp_pda(payer.unwrap().key),
             ErrorCode::InvalidHopAccounts
         );
     }
@@ -692,6 +700,7 @@ mod tests {
         assert_eq!(BUY_AUTHORITY_IDX, 1);
         assert_eq!(BUY_DST_IDX, 5);
         assert_eq!(BUY_SRC_IDX, 6);
+        assert_eq!(BUY_QUOTE_MINT_IDX, 4);
         assert_eq!(BUY_QUOTE_TOKEN_PROGRAM_IDX, 12);
         assert_eq!(BUY_USER_VOLUME_ACC_IDX, 20);
         // window: 4 routing slots + 23 CPI accounts + trailing trio + the

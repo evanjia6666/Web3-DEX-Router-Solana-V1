@@ -1,7 +1,7 @@
 use crate::error::ErrorCode;
-use crate::{authority_pda, token_program};
+use crate::authority_pda;
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_lang::solana_program::system_instruction;
 use anchor_spl::token::TokenAccount;
 use anchor_spl::token_interface::{self, Mint, TokenInterface};
@@ -54,25 +54,38 @@ pub fn create_pump_hop0_temp_handler<'a>(
         ErrorCode::InvalidTokenProgram
     );
 
-    // rent funded by the payer inside this instruction; system
-    // create_account fails on a funded/in-use account, which doubles as
-    // the same-slot collision guard
-    let rent = Rent::get()?;
-    let lamports = rent.minimum_balance(TokenAccount::LEN);
+    // allocate+assign instead of create_account: create_account requires
+    // the address to carry 0 lamports, so a 1-lamport transfer from anyone
+    // would PERMANENTLY brick this wallet's hop0 temp (the PDA keypair
+    // does not exist, the lamports can never be withdrawn). allocate only
+    // requires empty data — pre-sent lamports are harmless (they ride
+    // along into the close sweep).
     let seeds: &[&[u8]] = &[b"pump-hop0", ctx.accounts.payer.key.as_ref(), &[bump]];
-    let ix_create = system_instruction::create_account(
-        ctx.accounts.payer.to_account_info().key,
-        temp.key,
-        lamports,
-        TokenAccount::LEN as u64,
-        token_mint.owner,
-    );
-    invoke_signed(
-        &ix_create,
-        &[ctx.accounts.payer.to_account_info(), temp.clone()],
-        &[seeds],
-    )?;
+    let ix_allocate = system_instruction::allocate(temp.key, TokenAccount::LEN as u64);
+    invoke_signed(&ix_allocate, &[temp.clone()], &[seeds])?;
+    let ix_assign = system_instruction::assign(temp.key, token_mint.owner);
+    invoke_signed(&ix_assign, &[temp.clone()], &[seeds])?;
+    // rent (minus anything already sitting on the address) from the payer
+    let rent = Rent::get()?;
+    let need = rent
+        .minimum_balance(TokenAccount::LEN)
+        .saturating_sub(temp.lamports());
+    if need > 0 {
+        let ix_fund = system_instruction::transfer(
+            ctx.accounts.payer.to_account_info().key,
+            temp.key,
+            need,
+        );
+        invoke(
+            &ix_fund,
+            &[ctx.accounts.payer.to_account_info(), temp.clone()],
+        )?;
+    }
 
+    if temp.lamports() >= rent.minimum_balance(TokenAccount::LEN) && temp.data_len() > 0 {
+        // already initialized (same-slot retry): nothing to do
+        return Ok(());
+    }
     token_interface::initialize_account3(CpiContext::new(
         ctx.accounts.token_program.to_account_info(),
         token_interface::InitializeAccount3 {

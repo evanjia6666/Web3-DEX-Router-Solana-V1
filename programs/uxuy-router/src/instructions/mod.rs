@@ -7,7 +7,6 @@ pub mod proxy_swap;
 pub mod swap;
 pub mod swap_v3;
 pub mod swap_v3_with_cpi_event;
-pub mod sweep_pda_token;
 pub mod wrap_unwrap_v3;
 
 pub use claim::*;
@@ -19,5 +18,4 @@ pub use proxy_swap::*;
 pub use swap::*;
 pub use swap_v3::*;
 pub use swap_v3_with_cpi_event::*;
-pub use sweep_pda_token::*;
 pub use wrap_unwrap_v3::*;

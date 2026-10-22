@@ -57,6 +57,15 @@ fn pump_curve_tail_metas(curve_v2: Pubkey, buyback: Pubkey) -> [AccountMeta; 2] 
     ]
 }
 
+
+/// The verifiable one-shot hop0 temp PDA (["pump-hop0", payer]) — the
+/// address both Go and this program derive; a shared custody/wsol_sa
+/// account can never match it, killing the permissionless-route
+/// "custody as source" vector.
+pub(crate) fn hop0_temp_pda(payer: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pump-hop0", payer.as_ref()], &crate::ID).0
+}
+
 /// Which trailing-account layout the curve CPI targets. The 2026-10 pump
 /// upgrade removed the free-form second buyback slot and now expects the
 /// `bonding-curve-v2` PDA there instead (sell gained the same pair), so the
@@ -354,13 +363,9 @@ fn buy_with_layout<'a>(
     // "custody as source" vector. hop >= 1 keeps custody/temp sources:
     // custody routing through intermediates is the design there.
     if hop == 0 {
-        let (expected_temp, _bump) = Pubkey::find_program_address(
-            &[b"pump-hop0", payer.unwrap().key().as_ref()],
-            &crate::ID,
-        );
-        require_keys_eq!(
+                require_keys_eq!(
             swap_accounts.swap_source_token.key(),
-            expected_temp,
+            hop0_temp_pda(payer.unwrap().key),
             ErrorCode::InvalidHopAccounts
         );
     }
@@ -1113,13 +1118,9 @@ pub fn buy_v2<'a>(
             ErrorCode::InvalidHopAccounts
         );
         if swap_accounts.user_edge.key() != pumpfun_program::ID {
-            let (expected_temp, _bump) = Pubkey::find_program_address(
-                &[b"pump-hop0", payer.unwrap().key.as_ref()],
-                &crate::ID,
-            );
             require_keys_eq!(
                 swap_accounts.swap_destination_token.key(),
-                expected_temp,
+                hop0_temp_pda(payer.unwrap().key),
                 ErrorCode::InvalidHopAccounts
             );
         }
@@ -1318,13 +1319,9 @@ pub fn sell_v2<'a>(
     // canonical quote ATA (pump validates canonicity) and is forwarded to
     // the user edge.
     if hop == 0 {
-        let (expected_temp, _bump) = Pubkey::find_program_address(
-            &[b"pump-hop0", payer.unwrap().key.as_ref()],
-            &crate::ID,
-        );
         require_keys_eq!(
             swap_accounts.swap_source_token.key(),
-            expected_temp,
+            hop0_temp_pda(payer.unwrap().key),
             ErrorCode::InvalidHopAccounts
         );
     }
@@ -1488,5 +1485,15 @@ mod tests {
         assert_eq!(BUY_CREATOR_VAULT_IDX, 9);
         assert_eq!(V2_BUY_UVA_IDX, 20);
         assert_eq!(V2_SELL_UVA_IDX, V2_BUY_UVA_IDX - 1);
+        // v2 leg layout: mint/program slots are shared, the user-side
+        // slots mirror between buy and sell
+        assert_eq!(V2_BASE_MINT_IDX, 1);
+        assert_eq!(V2_QUOTE_MINT_IDX, 2);
+        assert_eq!(V2_BASE_TOKEN_PROGRAM_IDX, 3);
+        assert_eq!(V2_QUOTE_TOKEN_PROGRAM_IDX, 4);
+        assert_eq!(V2_BUY_SRC_IDX, 15); // quote in
+        assert_eq!(V2_BUY_DST_IDX, 14); // base out
+        assert_eq!(V2_SELL_SRC_IDX, 14); // base in
+        assert_eq!(V2_SELL_DST_IDX, 15); // quote out
     }
 }

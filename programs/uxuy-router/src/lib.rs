@@ -149,13 +149,6 @@ pub mod uxuy_router {
         instructions::create_pump_hop0_temp_handler(ctx, bump)
     }
 
-    pub fn sweep_pda_token<'a>(
-        ctx: Context<'_, '_, 'a, 'a, SweepPdaTokenAccounts<'a>>,
-        amount: u64,
-    ) -> Result<()> {
-        instructions::sweep_pda_token_handler(ctx, amount)
-    }
-
     pub fn create_token_account<'a>(
         ctx: Context<'_, '_, 'a, 'a, CreateTokenAccountAccounts<'a>>,
         bump: u8,
