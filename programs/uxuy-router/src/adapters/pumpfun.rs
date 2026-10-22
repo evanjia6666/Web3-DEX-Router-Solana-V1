@@ -795,6 +795,21 @@ pub struct PumpfunV2Processor {
     /// v2 layouts carry it at different slots (sell has no global
     /// accumulator), so each leg pins its own
     pub uva_idx: usize,
+    /// the leg's user-side src/dst indexes — buy_v2 carries (quote src@15,
+    /// base dst@14), sell_v2 the mirror (base src@14, quote dst@15)
+    pub src_idx: usize,
+    pub dst_idx: usize,
+    /// the hop0-final forward side: buy legs forward the BASE output,
+    /// sell legs the QUOTE output — mint/program indexes of that side
+    pub fwd_mint_idx: usize,
+    pub fwd_prog_idx: usize,
+    pub is_buy: bool,
+    /// pre-CPI lamports of the forward-from account: token movements move
+    /// lamports 1:1, so the forwardable delta is the lamports delta — the
+    /// persistent canonical quote ATA may carry unrelated balance and only
+    /// the delta may ever be forwarded. BPF is single-threaded, interior
+    /// mutability is fine.
+    pre_dst: std::cell::Cell<u64>,
 }
 
 impl DexProcessor for PumpfunV2Processor {
@@ -816,6 +831,8 @@ impl DexProcessor for PumpfunV2Processor {
                     ErrorCode::InsufficientFunds
                 );
             }
+            self.pre_dst
+                .set(account_infos.get(self.dst_idx).unwrap().lamports());
         }
         Ok(before_authority_lamports)
     }
@@ -828,31 +845,88 @@ impl DexProcessor for PumpfunV2Processor {
         before_authority_lamports: u64,
     ) -> Result<u64> {
         let authority = account_infos.get(V2_AUTHORITY_IDX).unwrap();
-        if authority.key() == authority_pda::ID {
-            // settle any surplus back to the payer; a deficit is a
-            // first-use rent the authority absorbs by design
-            let drain = authority
+        if authority.key() != authority_pda::ID {
+            return Ok(0);
+        }
+        // hop0-final settlement: the output sits on a PDA-owned account
+        // (buy: the one-shot base temp; sell: the PDA's canonical quote
+        // ATA — pump validates canonicity against the authority). Forward
+        // exactly the received delta to the user's edge account, then
+        // close the drained one-shot temp (buy: dst; sell: src) and
+        // return its rent to the payer. Go signals hop0-final by passing
+        // a real account in the trailing user-edge slot (program-id
+        // filler otherwise).
+        let payer = account_infos.last().unwrap();
+        let user_edge = account_infos.get(account_infos.len() - 2).unwrap();
+        if user_edge.key() != pumpfun_program::ID {
+            let from = account_infos.get(self.dst_idx).unwrap();
+            let delta = from
                 .lamports()
-                .saturating_sub(before_authority_lamports);
-            require!(drain <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
-            if drain > 0 {
-                let payer = account_infos.last().unwrap();
-                transfer_sol(
-                    authority.to_account_info(),
-                    payer.to_account_info(),
-                    drain,
-                    Some(SA_AUTHORITY_SEED),
-                )?;
-                msg!("pumpfun v2: authority swept {} lamports back to payer", drain);
-            }
+                .checked_sub(self.pre_dst.get())
+                .ok_or(ErrorCode::CalculationError)?;
+            let fwd_mint = account_infos.get(self.fwd_mint_idx).unwrap();
+            let fwd_prog = account_infos.get(self.fwd_prog_idx).unwrap();
+            // decimals sits at byte 44 of both SPL and Token-2022 mints
+            let decimals = fwd_mint.try_borrow_data()?[44];
+            crate::utils::transfer_token(
+                authority.to_account_info(),
+                from.to_account_info(),
+                user_edge.to_account_info(),
+                fwd_mint.to_account_info(),
+                fwd_prog.to_account_info(),
+                delta,
+                decimals,
+                Some(SA_AUTHORITY_SEED),
+            )?;
+            // the one-shot temp always holds the BASE mint (buy output /
+            // sell input); drained now — rent back to the payer
+            let temp_idx = if self.is_buy { self.dst_idx } else { self.src_idx };
+            let temp = account_infos.get(temp_idx).unwrap();
+            let base_prog = account_infos.get(V2_BASE_TOKEN_PROGRAM_IDX).unwrap();
+            close_token_account(
+                temp.to_account_info(),
+                payer.to_account_info(),
+                authority.to_account_info(),
+                base_prog.to_account_info(),
+                Some(SA_AUTHORITY_SEED),
+            )?;
+            msg!(
+                "pumpfun v2 hop0-final: forwarded {} to user edge, temp rent returned",
+                delta
+            );
+        }
+        // settle any surplus back to the payer; a deficit is a
+        // first-use rent the authority absorbs by design
+        let drain = authority
+            .lamports()
+            .saturating_sub(before_authority_lamports);
+        require!(drain <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
+        if drain > 0 {
+            transfer_sol(
+                authority.to_account_info(),
+                payer.to_account_info(),
+                drain,
+                Some(SA_AUTHORITY_SEED),
+            )?;
+            msg!("pumpfun v2: authority swept {} lamports back to payer", drain);
         }
         Ok(0)
     }
 }
-// account_infos layout: CPI accounts in wire order, payer appended last
+// account_infos layout: CPI accounts in wire order, then the hop0-final
+// user-edge slot (program-id filler when the leg is mid-route), payer last
 const V2_AUTHORITY_IDX: usize = 13; // `user` slot of both v2 instructions
+const V2_BASE_MINT_IDX: usize = 1; // both v2 layouts
+const V2_QUOTE_MINT_IDX: usize = 2; // both v2 layouts
+const V2_BASE_TOKEN_PROGRAM_IDX: usize = 3; // both v2 layouts
+const V2_QUOTE_TOKEN_PROGRAM_IDX: usize = 4; // both v2 layouts
 const V2_BUY_UVA_IDX: usize = 20; // buy_v2: gva@19, uva@20, assoc-uva@21
 const V2_SELL_UVA_IDX: usize = 19; // sell_v2 layout carries no gva
+// buy_v2 user-side slots: base out @14, quote in @15; sell_v2 mirrors
+const V2_BUY_SRC_IDX: usize = 15;
+const V2_BUY_DST_IDX: usize = 14;
+const V2_SELL_SRC_IDX: usize = 14;
+const V2_SELL_DST_IDX: usize = 15;
 
 pub struct PumpfunBuyV2Accounts<'info> {
     pub dex_program_id: &'info AccountInfo<'info>,
@@ -883,8 +957,12 @@ pub struct PumpfunBuyV2Accounts<'info> {
     pub system_program: &'info AccountInfo<'info>,
     pub event_authority: &'info AccountInfo<'info>,
     pub program: &'info AccountInfo<'info>,
+    // window-only (NOT forwarded to the CPI): on a hop0-final leg the
+    // user's edge account that receives the forwarded base output;
+    // program-id filler mid-route
+    pub user_edge: &'info AccountInfo<'info>,
 }
-const BUY_V2_ACCOUNTS_LEN: usize = 28;
+const BUY_V2_ACCOUNTS_LEN: usize = 29;
 
 impl<'info> PumpfunBuyV2Accounts<'info> {
     fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
@@ -896,7 +974,7 @@ impl<'info> PumpfunBuyV2Accounts<'info> {
             associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault,
             associated_creator_vault, sharing_config, global_volume_accumulator,
             user_volume_accumulator, associated_user_volume_accumulator, fee_config,
-            fee_program, system_program, event_authority, program,
+            fee_program, system_program, event_authority, program, user_edge,
         ]: &[AccountInfo<'info>; BUY_V2_ACCOUNTS_LEN] =
             array_ref![accounts, offset, BUY_V2_ACCOUNTS_LEN];
 
@@ -911,7 +989,7 @@ impl<'info> PumpfunBuyV2Accounts<'info> {
             associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault,
             associated_creator_vault, sharing_config, global_volume_accumulator,
             user_volume_accumulator, associated_user_volume_accumulator, fee_config,
-            fee_program, system_program, event_authority, program,
+            fee_program, system_program, event_authority, program, user_edge,
         })
     }
 }
@@ -938,14 +1016,11 @@ pub fn buy_v2<'a>(
     }
     swap_accounts.bonding_curve.key().log();
 
-    before_check(
+    before_check_pda_user(
         swap_accounts.swap_authority_pubkey,
         &swap_accounts.swap_source_token,
         swap_accounts.swap_destination_token.key(),
         hop_accounts,
-        hop,
-        proxy_swap,
-        owner_seeds,
     )?;
 
     let mut data = Vec::with_capacity(ARGS_LEN_V2);
@@ -1012,15 +1087,55 @@ pub fn buy_v2<'a>(
         a.system_program.to_account_info(),
         a.event_authority.to_account_info(),
         a.program.to_account_info(),
+        a.user_edge.to_account_info(),
         payer.unwrap().to_account_info(),
     ];
+
+    // hop0: the quote source must be the PDA's canonical quote ATA (pump
+    // validates canonicity against the authority; this also locks
+    // custody/wsol_sa out of the source slot). When the leg is final
+    // (real user-edge account) the base output must ride the verifiable
+    // one-shot temp — the after-hook closes exactly that account.
+    if hop == 0 {
+        let (canonical_quote, _) = Pubkey::find_program_address(
+            &[
+                swap_accounts.swap_authority_pubkey.key.as_ref(),
+                swap_accounts.quote_mint.key.as_ref(),
+            ],
+            &anchor_spl::associated_token::ID,
+        );
+        require_keys_eq!(
+            swap_accounts.swap_source_token.key(),
+            canonical_quote,
+            ErrorCode::InvalidHopAccounts
+        );
+        if swap_accounts.user_edge.key() != pumpfun_program::ID {
+            let (expected_temp, _bump) = Pubkey::find_program_address(
+                &[b"pump-hop0", payer.unwrap().key.as_ref()],
+                &crate::ID,
+            );
+            require_keys_eq!(
+                swap_accounts.swap_destination_token.key(),
+                expected_temp,
+                ErrorCode::InvalidHopAccounts
+            );
+        }
+    }
 
     let instruction =
         Instruction { program_id: swap_accounts.dex_program_id.key(), accounts, data };
 
     invoke_process(
         amount_in,
-        &PumpfunV2Processor { uva_idx: V2_BUY_UVA_IDX },
+        &PumpfunV2Processor {
+            uva_idx: V2_BUY_UVA_IDX,
+            src_idx: V2_BUY_SRC_IDX,
+            dst_idx: V2_BUY_DST_IDX,
+            fwd_mint_idx: V2_BASE_MINT_IDX,
+            fwd_prog_idx: V2_BASE_TOKEN_PROGRAM_IDX,
+            is_buy: true,
+            pre_dst: std::cell::Cell::new(0),
+        },
         &account_infos,
         &mut swap_accounts.swap_source_token,
         &mut swap_accounts.swap_destination_token,
@@ -1062,8 +1177,12 @@ pub struct PumpfunSellV2Accounts<'info> {
     pub system_program: &'info AccountInfo<'info>,
     pub event_authority: &'info AccountInfo<'info>,
     pub program: &'info AccountInfo<'info>,
+    // window-only (NOT forwarded to the CPI): on a hop0-final leg the
+    // user's edge account that receives the forwarded quote output;
+    // program-id filler mid-route
+    pub user_edge: &'info AccountInfo<'info>,
 }
-const SELL_V2_ACCOUNTS_LEN: usize = 27;
+const SELL_V2_ACCOUNTS_LEN: usize = 28;
 
 impl<'info> PumpfunSellV2Accounts<'info> {
     fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
@@ -1075,7 +1194,7 @@ impl<'info> PumpfunSellV2Accounts<'info> {
             associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault,
             associated_creator_vault, sharing_config, user_volume_accumulator,
             associated_user_volume_accumulator, fee_config, fee_program, system_program,
-            event_authority, program,
+            event_authority, program, user_edge,
         ]: &[AccountInfo<'info>; SELL_V2_ACCOUNTS_LEN] =
             array_ref![accounts, offset, SELL_V2_ACCOUNTS_LEN];
 
@@ -1090,7 +1209,7 @@ impl<'info> PumpfunSellV2Accounts<'info> {
             associated_base_bonding_curve, associated_quote_bonding_curve, creator_vault,
             associated_creator_vault, sharing_config, user_volume_accumulator,
             associated_user_volume_accumulator, fee_config, fee_program, system_program,
-            event_authority, program,
+            event_authority, program, user_edge,
         })
     }
 }
@@ -1117,14 +1236,11 @@ pub fn sell_v2<'a>(
     }
     swap_accounts.bonding_curve.key().log();
 
-    before_check(
+    before_check_pda_user(
         swap_accounts.swap_authority_pubkey,
         &swap_accounts.swap_source_token,
         swap_accounts.swap_destination_token.key(),
         hop_accounts,
-        hop,
-        proxy_swap,
-        owner_seeds,
     )?;
 
     let mut data = Vec::with_capacity(ARGS_LEN_V2);
@@ -1189,15 +1305,41 @@ pub fn sell_v2<'a>(
         a.system_program.to_account_info(),
         a.event_authority.to_account_info(),
         a.program.to_account_info(),
+        a.user_edge.to_account_info(),
         payer.unwrap().to_account_info(),
     ];
+
+    // hop0 (always final per compose's shape gate): the base input must
+    // ride the verifiable one-shot temp (pump debits it; the after-hook
+    // closes it once drained); the quote output lands on the PDA's
+    // canonical quote ATA (pump validates canonicity) and is forwarded to
+    // the user edge.
+    if hop == 0 {
+        let (expected_temp, _bump) = Pubkey::find_program_address(
+            &[b"pump-hop0", payer.unwrap().key.as_ref()],
+            &crate::ID,
+        );
+        require_keys_eq!(
+            swap_accounts.swap_source_token.key(),
+            expected_temp,
+            ErrorCode::InvalidHopAccounts
+        );
+    }
 
     let instruction =
         Instruction { program_id: swap_accounts.dex_program_id.key(), accounts, data };
 
     invoke_process(
         amount_in,
-        &PumpfunV2Processor { uva_idx: V2_SELL_UVA_IDX },
+        &PumpfunV2Processor {
+            uva_idx: V2_SELL_UVA_IDX,
+            src_idx: V2_SELL_SRC_IDX,
+            dst_idx: V2_SELL_DST_IDX,
+            fwd_mint_idx: V2_QUOTE_MINT_IDX,
+            fwd_prog_idx: V2_QUOTE_TOKEN_PROGRAM_IDX,
+            is_buy: false,
+            pre_dst: std::cell::Cell::new(0),
+        },
         &account_infos,
         &mut swap_accounts.swap_source_token,
         &mut swap_accounts.swap_destination_token,
@@ -1329,8 +1471,10 @@ mod tests {
     pub fn test_window_lengths() {
         assert_eq!(BUY_ACCOUNTS_LEN, 4 + 18 - 3 + 1); // +src_token_program
         assert_eq!(SELL_ACCOUNTS_LEN, 4 + 14 - 3 + 1); // +wsol_program
-        assert_eq!(BUY_V2_ACCOUNTS_LEN, 4 + 27 - 3);
-        assert_eq!(SELL_V2_ACCOUNTS_LEN, 4 + 26 - 3);
+        // v2 windows carry one window-only trailing slot (the hop0-final
+        // user edge; program-id filler mid-route) that never rides the CPI
+        assert_eq!(BUY_V2_ACCOUNTS_LEN, 4 + 27 - 3 + 1);
+        assert_eq!(SELL_V2_ACCOUNTS_LEN, 4 + 26 - 3 + 1);
         // processor rows: CPI accounts + helpers (+payer)
         assert_eq!(BUY_PROCESSOR_LEN, 18 + 3); // +src prog, payer, src
         assert_eq!(V2_AUTHORITY_IDX, 13); // `user` slot of both v2 layouts
