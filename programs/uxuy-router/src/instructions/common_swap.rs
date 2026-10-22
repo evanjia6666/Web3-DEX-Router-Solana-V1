@@ -131,6 +131,17 @@ pub fn common_swap<'info, T: CommonSwapProcessor<'info>>(
         min_return,
     );
 
+    // The route-edge source account belongs to the payer (classic wallet
+    // edges) or to the router authority PDA (pump-first routes ride a
+    // PDA-owned temp as pump's `user`, so wallets never pay pump's
+    // per-user first-use rents); the declarative contexts only pin the
+    // mint, this check pins the owner.
+    require!(
+        source_token_account.owner == payer.key()
+            || source_token_account.owner == authority_pda::ID,
+        ErrorCode::SourceTokenAccountOwner
+    );
+
     // Verify sa_authority is valid
     if sa_authority.is_some() {
         require!(
@@ -272,6 +283,17 @@ pub fn common_swap_v3<'info, T: PlatformFeeV3Processor<'info>>(
         args.amount_in,
         args.expect_amount_out,
         min_return,
+    );
+
+    // The route-edge source account belongs to the payer (classic wallet
+    // edges) or to the router authority PDA (pump-first routes ride a
+    // PDA-owned temp as pump's `user`, so wallets never pay pump's
+    // per-user first-use rents); the declarative contexts only pin the
+    // mint, this check pins the owner.
+    require!(
+        source_token_account.owner == payer.key()
+            || source_token_account.owner == authority_pda::ID,
+        ErrorCode::SourceTokenAccountOwner
     );
 
     // Verify sa_authority is valid

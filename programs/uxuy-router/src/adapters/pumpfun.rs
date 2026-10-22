@@ -1,4 +1,4 @@
-use super::common::{before_check, invoke_process, DexProcessor};
+use super::common::{before_check, before_check_pda_user, invoke_process, DexProcessor};
 use crate::error::ErrorCode;
 use crate::utils::{close_token_account, sync_wsol_account, transfer_sol};
 use crate::{
@@ -170,57 +170,48 @@ pub struct PumpfunBuyProcessor {
 
 impl DexProcessor for PumpfunBuyProcessor {
     fn before_invoke(&self, account_infos: &[AccountInfo]) -> Result<u64> {
+        // the pump `user` is the authority PDA at every hop (2026-10-22
+        // unification): the disposable wSOL source is PDA-owned even at
+        // hop0, so the PDA both signs and receives the close
         let authority = account_infos.get(6).unwrap();
         let src_token_program = account_infos.get(BUY_PROCESSOR_LEN - 3).unwrap();
         let source_token_account = account_infos.last().unwrap();
         let before_authority_lamports = authority.lamports();
 
-        if authority.key() == authority_pda::ID {
-            // the source is closed into the authority: it must be a
-            // disposable per-tx wSOL temp, never the shared wsol_sa or a
-            // warmed custody account (the caller guarantees this; the
-            // shared account would be destroyed)
+        // the source is closed into the authority: it must be a
+        // disposable per-tx wSOL temp, never the shared wsol_sa or a
+        // warmed custody account (the caller guarantees this; the
+        // shared account would be destroyed)
+        require!(
+            source_token_account.key() != wsol_sa::ID,
+            ErrorCode::InvalidSourceTokenAccount
+        );
+        // pump's on-first-use rents — the per-user volume accumulator,
+        // plus the coin's creator vault on its first-ever buy — are
+        // charged to the buy's `user` slot (our PDA) and are borne by
+        // its standing balance, never the payer. Fail fast while any
+        // of them is unborn and the balance can't cover the worst case
+        // (2.4M > 1,346,200 + 890,880): a short authority would
+        // silently spend the temp's refundable rent and abort the
+        // after-hook refund instead.
+        let user_volume_accumulator = account_infos.get(BUY_USER_VOLUME_ACC_IDX).unwrap();
+        let creator_vault = account_infos.get(BUY_CREATOR_VAULT_IDX).unwrap();
+        let first_use_missing = (user_volume_accumulator.lamports() == 0
+            && user_volume_accumulator.data_len() == 0)
+            || (creator_vault.lamports() == 0 && creator_vault.data_len() == 0);
+        if first_use_missing {
             require!(
-                source_token_account.key() != wsol_sa::ID,
-                ErrorCode::InvalidSourceTokenAccount
+                before_authority_lamports >= PUMPFUN_FUND_HEADROOM,
+                ErrorCode::InsufficientFunds
             );
-            // pump's on-first-use rents — the per-user volume accumulator,
-            // plus the coin's creator vault on its first-ever buy — are
-            // charged to the buy's `user` slot (our PDA) and are borne by
-            // its standing balance, never the payer. Fail fast while any
-            // of them is unborn and the balance can't cover the worst case
-            // (2.4M > 1,346,200 + 890,880): a short authority would
-            // silently spend the temp's refundable rent and abort the
-            // after-hook refund instead.
-            let user_volume_accumulator = account_infos.get(BUY_USER_VOLUME_ACC_IDX).unwrap();
-            let creator_vault = account_infos.get(BUY_CREATOR_VAULT_IDX).unwrap();
-            let first_use_missing = (user_volume_accumulator.lamports() == 0
-                && user_volume_accumulator.data_len() == 0)
-                || (creator_vault.lamports() == 0 && creator_vault.data_len() == 0);
-            if first_use_missing {
-                require!(
-                    before_authority_lamports >= PUMPFUN_FUND_HEADROOM,
-                    ErrorCode::InsufficientFunds
-                );
-            }
-            close_token_account(
-                source_token_account.to_account_info(),
-                authority.to_account_info(),
-                authority.to_account_info(),
-                src_token_program.to_account_info(),
-                Some(SA_AUTHORITY_SEED),
-            )?;
-        } else {
-            // hop0 direct: the wallet owns the temp and signs the tx; the
-            // close simply returns the wrapped input to the wallet
-            close_token_account(
-                source_token_account.to_account_info(),
-                authority.to_account_info(),
-                authority.to_account_info(),
-                src_token_program.to_account_info(),
-                None,
-            )?;
         }
+        close_token_account(
+            source_token_account.to_account_info(),
+            authority.to_account_info(),
+            authority.to_account_info(),
+            src_token_program.to_account_info(),
+            Some(SA_AUTHORITY_SEED),
+        )?;
         Ok(before_authority_lamports)
     }
 
@@ -233,24 +224,22 @@ impl DexProcessor for PumpfunBuyProcessor {
     ) -> Result<u64> {
         let authority = account_infos.get(6).unwrap();
         let payer = account_infos.get(BUY_PROCESSOR_LEN - 2).unwrap();
-        if authority.key() == authority_pda::ID {
-            // refund exactly the rent the funding wallet advanced for the
-            // temp: the wrapped input was consumed by the buy and pump's
-            // on-first-use rents come out of the authority's standing
-            // balance — the payer nets zero on every buy, first or not
-            require!(self.temp_rent <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
-            if self.temp_rent > 0 {
-                transfer_sol(
-                    authority.to_account_info(),
-                    payer.to_account_info(),
-                    self.temp_rent,
-                    Some(SA_AUTHORITY_SEED),
-                )?;
-                msg!(
-                    "pumpfun buy: authority refunded {} lamports of temp rent to payer",
-                    self.temp_rent
-                );
-            }
+        // refund exactly the rent the funding wallet advanced for the
+        // temp: the wrapped input was consumed by the buy and pump's
+        // on-first-use rents come out of the authority's standing
+        // balance — the payer nets zero on every buy, first or not
+        require!(self.temp_rent <= SOL_DIFF_LIMIT, ErrorCode::InvalidDiffLamports);
+        if self.temp_rent > 0 {
+            transfer_sol(
+                authority.to_account_info(),
+                payer.to_account_info(),
+                self.temp_rent,
+                Some(SA_AUTHORITY_SEED),
+            )?;
+            msg!(
+                "pumpfun buy: authority refunded {} lamports of temp rent to payer",
+                self.temp_rent
+            );
         }
         Ok(0)
     }
@@ -335,14 +324,15 @@ fn buy_with_layout<'a>(
     }
     swap_accounts.bonding_curve.key().log();
 
-    before_check(
+    // the pump `user` is the authority PDA at every hop (2026-10-22
+    // unification): hop0 rides a PDA-owned disposable temp too, so the
+    // wallets never become pump users and never pay the per-user
+    // first-use rents themselves
+    before_check_pda_user(
         swap_accounts.swap_authority_pubkey,
         &swap_accounts.swap_source_token,
         swap_accounts.swap_destination_token.key(),
         hop_accounts,
-        hop,
-        proxy_swap,
-        owner_seeds,
     )?;
 
     // spendable_sol_in = amount_in (fees inside), min_tokens_out = 1: the

@@ -1,8 +1,8 @@
-785784
+790640
 # uxuy_router.so @ sbpfv3, platform-tools v1.58 (rustc 1.95.0-dev), HEAD local
-# (review fixes: curve first-use gate extended to the creator vault; v2 legs
-# gained the standing-floor pre-check via per-leg uva_idx; +1,032 B vs
-# 784,752). History: 659,760 (old anchor toolchain, de71a19 era) →
+# (pump PDA-user unification: hop0 curve/AMM buys ride the authority PDA
+# (before_check_pda_user, AMM hop0 drained-temp close, PDA-seed hop0 CPI,
+# payer-or-PDA source-owner check); +4,856 B vs 785,784). History: 659,760 (old anchor toolchain, de71a19 era) →
 # 793,112/845,408 (v1.51.1 pre/post pumpfun) → 732,352/778,960 (v1.58
 # pre/post) → 776,512 (v1.58 + dyn dedup) → 780,256 (+ rent front) →
 # 786,512 (+ curve 2026-10 tail) → 784,752 (rent front removed, rents

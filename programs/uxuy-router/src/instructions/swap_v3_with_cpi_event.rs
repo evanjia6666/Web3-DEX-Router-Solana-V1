@@ -17,7 +17,6 @@ pub struct SwapAccountsV3WithCpiEvent<'info> {
     #[account(
         mut,
         token::mint = source_mint,
-        token::authority = payer,
     )]
     pub source_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 

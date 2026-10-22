@@ -255,4 +255,6 @@ pub enum ErrorCode {
     SlippageTooHigh,
     #[msg("Only single-path routes are supported")]
     MultiPathNotSupported,
+    #[msg("Source token account must be owned by the payer or the router authority")]
+    SourceTokenAccountOwner,
 }

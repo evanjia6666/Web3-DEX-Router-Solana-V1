@@ -13,7 +13,6 @@ pub struct ProxySwapAccounts<'info> {
     #[account(
         mut,
         token::mint = source_mint,
-        token::authority = payer,
         token::token_program = source_token_program,
     )]
     pub source_token_account: Box<InterfaceAccount<'info, TokenAccount>>,

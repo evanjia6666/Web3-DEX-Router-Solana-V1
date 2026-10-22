@@ -21,7 +21,6 @@ pub struct CommissionProxySwapAccountsV3<'info> {
     #[account(
         mut,
         token::mint = source_mint,
-        token::authority = payer,
     )]
     pub source_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
@@ -164,7 +163,6 @@ pub struct CommissionProxySwapAccountsV3WithReceiver<'info> {
     #[account(
         mut,
         token::mint = source_mint,
-        token::authority = payer,
     )]
     pub source_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 

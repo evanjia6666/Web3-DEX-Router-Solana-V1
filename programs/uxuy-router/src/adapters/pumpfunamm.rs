@@ -1,7 +1,7 @@
 use super::common::DexProcessor;
-use crate::adapters::common::{before_check, invoke_process};
+use crate::adapters::common::{before_check, before_check_pda_user, invoke_process};
 use crate::error::ErrorCode;
-use crate::utils::transfer_sol;
+use crate::utils::{close_token_account, transfer_sol};
 use crate::{
     BUY_EXACT_QUOTE_IN_SELECTOR, HopAccounts, PUMPFUN_SELL_SELECTOR, PUMPFUNAMM_FUND_HEADROOM,
     SA_AUTHORITY_SEED, SOL_DIFF_LIMIT, authority_pda, pumpfunamm_program,
@@ -294,6 +294,10 @@ const BUY_ACCOUNTS_LEN3: usize = 26;
 // the payer rides last (see buy3).
 const BUY_AUTHORITY_IDX: usize = 1;
 const BUY_USER_VOLUME_ACC_IDX: usize = 20;
+// hop0 drained-temp close: the quote-side source account and its token
+// program in the processor row (the close needs the program CPI)
+const BUY_SRC_IDX: usize = 6;
+const BUY_QUOTE_TOKEN_PROGRAM_IDX: usize = 12;
 
 impl<'info> PumpfunammBuyAccounts3<'info> {
     fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
@@ -360,20 +364,15 @@ impl<'info> PumpfunammBuyAccounts3<'info> {
 pub struct PumpfunammBuyProcessor;
 impl DexProcessor for PumpfunammBuyProcessor {
     fn before_invoke(&self, account_infos: &[AccountInfo]) -> Result<u64> {
+        // the pump_amm `user` is the authority PDA at every hop (2026-10-22
+        // unification): its standing balance (seeded by ops) bears pump's
+        // first-use rents, and the wallet never becomes a pump user
         let authority = account_infos.get(BUY_AUTHORITY_IDX).unwrap();
         let before_authority_lamports = authority.lamports();
 
-        if authority.key() != authority_pda::ID {
-            // wallet-authority hop (no custody): the wallet itself is the
-            // pump `user` and pays pump's first-use rents exactly like a
-            // direct trade — nothing to front or sweep
-            return Ok(before_authority_lamports);
-        }
-
-        // Custody topology: the authority PDA sits in pump's `user` slot, so
-        // the first-ever buy makes pump create the per-user volume
-        // accumulator and charge its rent to the PDA. The authority's
-        // standing balance (seeded by ops) bears it: fail fast while the
+        // Custody topology: the authority PDA sits in pump's `user` slot,
+        // so the first-ever buy makes pump create the per-user volume
+        // accumulator and charge its rent to the PDA. Fail fast while the
         // accumulator is unborn and the balance can't cover the rent — the
         // payer is never charged, and steady-state buys (accumulator
         // exists) move no native lamports at all.
@@ -392,13 +391,26 @@ impl DexProcessor for PumpfunammBuyProcessor {
     fn after_invoke(
         &self,
         account_infos: &[AccountInfo],
-        _hop: usize,
+        hop: usize,
         _owner_seeds: Option<&[&[&[u8]]]>,
         before_authority_lamports: u64,
     ) -> Result<u64> {
         let authority = account_infos.get(BUY_AUTHORITY_IDX).unwrap();
-        if authority.key() != authority_pda::ID {
-            return Ok(0);
+        // hop0: the source is a disposable PDA-owned temp (custody only
+        // enters at hop >= 1 — compose guarantees it, same contract as the
+        // curve adapter's forced temp); pump has now debited it exactly,
+        // so close it and return the fronted rent to the payer
+        if hop == 0 {
+            let payer = account_infos.last().unwrap();
+            let source = account_infos.get(BUY_SRC_IDX).unwrap();
+            let quote_token_program = account_infos.get(BUY_QUOTE_TOKEN_PROGRAM_IDX).unwrap();
+            close_token_account(
+                source.to_account_info(),
+                payer.to_account_info(),
+                authority.to_account_info(),
+                quote_token_program.to_account_info(),
+                Some(SA_AUTHORITY_SEED),
+            )?;
         }
         // Settle any surplus back to the payer; a deficit is pump's
         // first-use rent charged to the `user` slot, absorbed by the
@@ -447,14 +459,14 @@ pub fn buy3<'a>(
     // log pool address
     swap_accounts.pool.key().log();
 
-    before_check(
+    // the pump_amm `user` is the authority PDA at every hop (2026-10-22
+    // unification): wallets never become pump users and never pay the
+    // per-user first-use rents themselves
+    before_check_pda_user(
         swap_accounts.swap_authority_pubkey,
         &swap_accounts.swap_source_token,
         swap_accounts.swap_destination_token.key(),
         hop_accounts,
-        hop,
-        proxy_swap,
-        owner_seeds,
     )?;
 
     let mut data = Vec::with_capacity(ARGS_LEN);
@@ -545,8 +557,8 @@ pub fn buy3<'a>(
     }
     account_infos.push(swap_accounts.buyback_fee_recipient.to_account_info());
     account_infos.push(swap_accounts.buyback_fee_recipient_quote_ata.to_account_info());
-    // payer rides last: buy-side first-use rents (user volume accumulator)
-    // are fronted from it and swept back — see PumpfunammBuyProcessor
+    // payer rides last: the after-hook returns the hop0 temp's rent and
+    // any surplus to it — see PumpfunammBuyProcessor
     account_infos.push(payer.unwrap().to_account_info());
 
     let instruction =

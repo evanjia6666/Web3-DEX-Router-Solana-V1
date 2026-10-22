@@ -11,7 +11,6 @@ pub struct SwapAccounts<'info> {
     #[account(
         mut,
         token::mint = source_mint,
-        token::authority = payer,
     )]
     pub source_token_account: InterfaceAccount<'info, TokenAccount>,
 

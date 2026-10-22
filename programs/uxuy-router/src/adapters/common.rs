@@ -77,6 +77,54 @@ pub fn before_check(
     Ok(())
 }
 
+/// Variant of before_check for adapters that ride the authority PDA as the
+/// DEX-side user at EVERY hop (the pump adapters after the 2026-10-22
+/// user-identity unification): the PDA owns the source token account and
+/// signs the CPI with its seeds, so the hop-0 wallet-signer requirement
+/// does not apply — the authority must be the PDA itself and must own the
+/// source.
+pub fn before_check_pda_user(
+    swap_authority_pubkey: &AccountInfo,
+    swap_source_token_account: &InterfaceAccount<TokenAccount>,
+    swap_destination_token: Pubkey,
+    hop_accounts: &mut HopAccounts,
+) -> Result<()> {
+    // check hop accounts
+    let swap_source_token = swap_source_token_account.key();
+    if hop_accounts.from_account != ZERO_ADDRESS {
+        require_keys_eq!(
+            swap_source_token,
+            hop_accounts.from_account,
+            ErrorCode::InvalidHopAccounts
+        );
+        require_keys_eq!(
+            swap_destination_token,
+            hop_accounts.to_account,
+            ErrorCode::InvalidHopAccounts
+        );
+    }
+    if hop_accounts.last_to_account != ZERO_ADDRESS {
+        require_keys_eq!(
+            swap_source_token,
+            hop_accounts.last_to_account,
+            ErrorCode::InvalidHopFromAccount
+        );
+    }
+
+    // the DEX-side user is the authority PDA at every hop: it owns the
+    // source (disposable temp or custody) and signs the CPI with its seeds
+    require_keys_eq!(
+        swap_authority_pubkey.key(),
+        authority_pda::id(),
+        ErrorCode::InvalidAuthorityPda
+    );
+    require!(
+        swap_authority_pubkey.key() == swap_source_token_account.owner,
+        ErrorCode::InvalidSwapAuthority
+    );
+    Ok(())
+}
+
 pub fn invoke_process<'info>(
     amount_in: u64,
     dex_processor: &dyn DexProcessor,
@@ -189,7 +237,15 @@ fn execute_instruction(
 ) -> Result<()> {
     if !proxy_swap && hop == 0 {
         if owner_seeds.is_none() {
-            invoke(instruction, account_infos)?;
+            // pump legs ride the authority PDA as the DEX-side user even
+            // at hop0 (the 2026-10-22 unification): when the PDA rides in
+            // the instruction's signer slot the CPI must be seed-signed —
+            // extra seed sets are inert for legs that don't carry it
+            if account_infos.iter().any(|a| a.key() == authority_pda::id()) {
+                invoke_signed(instruction, account_infos, SA_AUTHORITY_SEED)?;
+            } else {
+                invoke(instruction, account_infos)?;
+            }
         } else {
             invoke_signed(instruction, account_infos, owner_seeds.unwrap())?;
         }
