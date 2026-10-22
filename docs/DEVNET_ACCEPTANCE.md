@@ -33,16 +33,32 @@
 | 9 | 3 跳组合（含 pump hop0 + 一个 AMM hop） | 逐跳结算正确、无余额滞留（**这条同时用于 CU 测量**） |
 | 10 | `claim` token 分支 | 能从 canonical quote ATA / custody 扫出指定 mint 的全额 |
 
+## 2.5 已完成的路由层验证（2026-10-22，打在 devnet 合并版 `e55bbf65…` 上）
+
+`scripts/devnet-probes/` 下的探针已跑通 **6/6**，不需要 DEX 流动性：
+
+| 用例 | 结果 | 证据 |
+|---|---|---|
+| proxy 同址 | ✅ `SourceTokenSaIsSource` | `probe-guards.js` |
+| 空 hop 列表 | ✅ `EmptyRoute` | `probe-guards.js` |
+| trim 短账户 | ✅ `InvalidAccountsLength` | `probe-guards.js` |
+| `create_pump_hop0_temp` | ✅ temp 165 B / state=1 / mint+owner 正确 | tx `5GCenyf2c1t6…WpB` |
+| hop0 空 temp | ✅ `InvalidSourceTokenAccount` | `probe-hop0.js` |
+| hop0 custody 当源 | ✅ `InvalidHopAccounts` | `probe-hop0.js` |
+
+> 这 6 条都是在**部署后的字节**上验证的（链上 sha256 与本地产物 MATCH），
+> 不是单元测试。剩余的是需要流动性/Go 侧构交易的正向路径。
+
 ## 3. 负向用例（必须精确命中错误码）
 
 | # | 构造 | 期望错误 |
 |---|---|---|
-| 1 | proxy：`source_token_account == source_token_sa` | `SourceTokenSaIsSource` |
+| 1 | proxy：`source_token_account == source_token_sa` | `SourceTokenSaIsSource` ✅ 已验证 |
 | 2 | proxy：`source_token_sa` 未实际入金（差额 != amount_in） | `SourceTokenSaNotCredited` |
-| 3 | `routes = [[ ]]`（空 hop 列表） | `EmptyRoute` |
-| 4 | `swap_v3` 带 `trim_rate > 0` 但无尾部账户 | `InvalidAccountsLength`（不再是 panic） |
-| 5 | hop0 pump buy：temp 只带租金、未转入 `amount_in` | `InvalidSourceTokenAccount` |
-| 6 | hop0 pump buy：把 custody / `wsol_sa` 当源 | `InvalidHopAccounts`（派生校验） |
+| 3 | `routes = [[ ]]`（空 hop 列表） | `EmptyRoute` ✅ 已验证 |
+| 4 | `swap_v3` 带 `trim_rate > 0` 但无尾部账户 | `InvalidAccountsLength`（不再是 panic）✅ 已验证 |
+| 5 | hop0 pump buy：temp 只带租金、未转入 `amount_in` | `InvalidSourceTokenAccount` ✅ 已验证 |
+| 6 | hop0 pump buy：把 custody / `wsol_sa` 当源 | `InvalidHopAccounts`（派生校验）✅ 已验证 |
 
 ## 4. CU 检查
 

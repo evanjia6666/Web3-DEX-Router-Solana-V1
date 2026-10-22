@@ -1,0 +1,9 @@
+{
+  "name": "uxuy-router-devnet-probes",
+  "private": true,
+  "description": "devnet negative-case probes for uxuy-router (no DEX liquidity required)",
+  "dependencies": {
+    "@solana/spl-token": "0.4.14",
+    "@solana/web3.js": "1.98.4"
+  }
+}
