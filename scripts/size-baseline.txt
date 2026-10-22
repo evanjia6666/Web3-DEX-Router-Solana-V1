@@ -1,5 +1,7 @@
-818248
+812904
 # uxuy_router.so @ sbpfv3, platform-tools v1.58 (rustc 1.95.0-dev), HEAD local
+# (opt-level z: 部署件 sbpfv2 617,296 B，buffer rent 4.297 SOL；
+#  sbpfv3 跟踪构建 818,248 -> 812,904)
 # (deepseek review fixes: proxy deposit delta check, hop0 temp must hold
 # amount_in, ATA three-seed derives, v2 forward by token amount, create
 # idempotency by SPL state, claim reserve, ToB pre-existing WSOL refund,
