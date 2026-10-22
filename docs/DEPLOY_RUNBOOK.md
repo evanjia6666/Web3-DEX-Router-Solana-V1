@@ -12,7 +12,8 @@
 | 用途 | 文件 | 字节 | sha256 |
 |---|---|---|---|
 | 线上基线（回滚用） | `target/deploy/rollback/71ee5a9-live-652304.so` | 652,304 | `685fb20bf69406f9d63e5dcfcb353441849f75b338677114402b1c86eb365ec4` |
-| 热修部署件（strip） | `target/deploy/rollback/fafecf4-hotfix-654824.so` | 654,824 | `61be408bc66a5227a723825b397f2effb4f3e61f5c109efffb207210bd2fa26a` |
+| 热修部署件（opt-s，第一版） | `target/deploy/rollback/fafecf4-hotfix-654824.so` | 654,824 | `61be408bc66a5227a723825b397f2effb4f3e61f5c109efffb207210bd2fa26a` |
+| **热修部署件（opt-z，推荐）** | `target/deploy/rollback/optz-hotfix-598104.so` | **598,104** | `aa0cbee7eaed661bdf4a545b85a4d16a83adf7e4de5fa40be4212b13c112dd66` |
 | devnet 现状（**无法作为回滚件**，见 §5） | `target/deploy/rollback/devnet-prev-848120.so` | 848,120 | `4e2cef99…`（与 devnet 链上 UNKNOWN 不匹配） |
 
 构建配方（必须 v1.58、sbpfv2、strip；sbpfv3 会被集群拒收）：
@@ -39,9 +40,11 @@ cargo build -p uxuy-router --release --target sbpfv2-solana-solana
 4. **账户容量**：线上 ProgramData 834,792 B（ELF 652,304 + 182,488 零填充）
    > 热修 654,824 B，**无需 realloc / `--max-len`**。
 5. **付费账户余额**：`solana program deploy` 会先建 buffer，需按 .so 大小垫付
-   rent-exempt（655 KB ≈ **4.56 SOL**，升级完成后退回）。
-   - `uxuy_ops_payer`（`HRF4WPP5…`）当前 **3.647 SOL → 不足**，需补 ≥ 1 SOL；
-   - `uxuy_mainnet_payer`（`5uuPqko7…`）当前 **0 SOL**。
+   rent-exempt（`(size+128)*6960` lamports，升级完成后退回）：
+   - opt-s 654,824 B → **4.558 SOL**；opt-z 598,104 B → **4.164 SOL**。
+   - `uxuy_ops_payer`（`HRF4WPP5…`）当前 **3.647 SOL**：opt-z 仍差 **0.52 SOL**。
+   - 付费账户不必是 ops 钱包：`--keypair` 只是 buffer 出资方，`--upgrade-authority`
+     另签；任何 ≥ 4.2 SOL 的钱包都能垫，rent 事后原路退回。
 6. **Go 侧确认**：proxy 路由不会把同一个账户同时传给 `source_token_account` 与
    `source_token_sa`（否则升级后该路由会以 `SourceTokenSaIsSource` 拒单）。
 7. **devnet 用例**：正常 proxy / 同址 / 未到账 三条先过（见 §4）。

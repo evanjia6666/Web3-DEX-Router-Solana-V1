@@ -1,5 +1,7 @@
-791648
+791608
 # uxuy_router.so @ sbpfv3, platform-tools v1.58 (rustc 1.95.0-dev), HEAD local
+# (opt-level z: sbpfv2 deploy artifact 654,824 -> 598,104 B [-8.7%],
+#  buffer rent -0.396 SOL; sbpfv3 tracking build barely moves, -40 B)
 # (pump PDA-user unification: hop0 curve/AMM buys ride the authority PDA
 # (before_check_pda_user, AMM hop0 drained-temp close, PDA-seed hop0 CPI,
 # payer-or-PDA source-owner check); +4,856 B vs 785,784). History: 659,760 (old anchor toolchain, de71a19 era) →
