@@ -2,7 +2,9 @@ use crate::error::ErrorCode;
 use crate::authority_pda;
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
+use anchor_lang::solana_program::program_pack::Pack;
 use anchor_lang::solana_program::system_instruction;
+use anchor_spl::token::spl_token::state::{Account as SplTokenAccount, AccountState};
 use anchor_spl::token::TokenAccount;
 use anchor_spl::token_interface::{self, Mint, TokenInterface};
 
@@ -61,15 +63,55 @@ pub fn create_pump_hop0_temp_handler<'a>(
     // requires empty data — pre-sent lamports are harmless (they ride
     // along into the close sweep).
     let seeds: &[&[u8]] = &[b"pump-hop0", ctx.accounts.payer.key.as_ref(), &[bump]];
-    let ix_allocate = system_instruction::allocate(temp.key, TokenAccount::LEN as u64);
-    invoke_signed(&ix_allocate, &[temp.clone()], &[seeds])?;
-    let ix_assign = system_instruction::assign(temp.key, token_mint.owner);
-    invoke_signed(&ix_assign, &[temp.clone()], &[seeds])?;
-    // rent (minus anything already sitting on the address) from the payer
     let rent = Rent::get()?;
-    let need = rent
-        .minimum_balance(TokenAccount::LEN)
-        .saturating_sub(temp.lamports());
+    let rent_min = rent.minimum_balance(TokenAccount::LEN);
+
+    // Idempotent retry: skip only when the address already holds a VALID
+    // initialized token account for this mint/authority. `lamports >= rent
+    // && data_len > 0` is NOT a valid marker — allocate/assign satisfy both
+    // before initialize_account3 ever runs, which silently turned this
+    // instruction into a no-op that left the temp uninitialized.
+    let already = {
+        let data = temp.try_borrow_data()?;
+        if data.len() == TokenAccount::LEN {
+            SplTokenAccount::unpack(&data)
+                .ok()
+                .filter(|ta| ta.state != AccountState::Uninitialized)
+                .map(|ta| (ta.mint, ta.owner))
+        } else {
+            None
+        }
+    };
+    if let Some((mint, owner)) = already {
+        require_keys_eq!(mint, token_mint.key(), ErrorCode::InvalidTokenMint);
+        require_keys_eq!(
+            owner,
+            ctx.accounts.authority.key(),
+            ErrorCode::InvalidTokenAccount
+        );
+        return Ok(());
+    }
+
+    if temp.data_len() == 0 {
+        let ix_allocate = system_instruction::allocate(temp.key, TokenAccount::LEN as u64);
+        invoke_signed(&ix_allocate, &[temp.clone()], &[seeds])?;
+        let ix_assign = system_instruction::assign(temp.key, token_mint.owner);
+        invoke_signed(&ix_assign, &[temp.clone()], &[seeds])?;
+    } else {
+        // allocated on an earlier attempt (allocate cannot run twice);
+        // only the assign half may still be missing
+        require!(
+            temp.data_len() == TokenAccount::LEN,
+            ErrorCode::InvalidTokenAccount
+        );
+        if temp.owner == &anchor_lang::solana_program::system_program::id() {
+            let ix_assign = system_instruction::assign(temp.key, token_mint.owner);
+            invoke_signed(&ix_assign, &[temp.clone()], &[seeds])?;
+        }
+    }
+
+    // rent (minus anything already sitting on the address) from the payer
+    let need = rent_min.saturating_sub(temp.lamports());
     if need > 0 {
         let ix_fund = system_instruction::transfer(
             ctx.accounts.payer.to_account_info().key,
@@ -82,10 +124,6 @@ pub fn create_pump_hop0_temp_handler<'a>(
         )?;
     }
 
-    if temp.lamports() >= rent.minimum_balance(TokenAccount::LEN) && temp.data_len() > 0 {
-        // already initialized (same-slot retry): nothing to do
-        return Ok(());
-    }
     token_interface::initialize_account3(CpiContext::new(
         ctx.accounts.token_program.to_account_info(),
         token_interface::InitializeAccount3 {

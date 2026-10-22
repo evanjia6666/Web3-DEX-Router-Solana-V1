@@ -14,6 +14,39 @@ use anchor_spl::token_2022::{self, Token2022};
 use anchor_spl::token_2022_extensions;
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
+/// Reject a caller-supplied program id before it is handed a PDA signature
+/// or forwarded into a DEX CPI: only the two token programs are valid.
+pub fn require_token_program(program: &AccountInfo) -> Result<()> {
+    require!(
+        program.key() == anchor_spl::token::Token::id()
+            || program.key() == anchor_spl::token_2022::Token2022::id(),
+        ErrorCode::InvalidTokenProgram
+    );
+    Ok(())
+}
+
+/// Canonical associated-token address. The ATA derivation takes THREE seeds
+/// (wallet, token program, mint) — a two-seed derive silently produces a
+/// different, unusable address.
+pub fn associated_token_address(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
+    anchor_spl::associated_token::get_associated_token_address_with_program_id(
+        wallet,
+        mint,
+        token_program,
+    )
+}
+
+/// Token-account `amount` without an Anchor re-deserialize: the SPL and
+/// Token-2022 base layouts both carry it at bytes 64..72. Used where a
+/// lamports delta cannot express a token movement (non-native mints).
+pub fn token_account_amount(account: &AccountInfo) -> Result<u64> {
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 72, ErrorCode::InvalidTokenAccount);
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&data[64..72]);
+    Ok(u64::from_le_bytes(buf))
+}
+
 pub fn transfer_token<'a>(
     authority: AccountInfo<'a>,
     from: AccountInfo<'a>,
@@ -304,4 +337,49 @@ pub fn is_token_account(account: &AccountInfo) -> bool {
 
 pub fn is_system_account(account: &AccountInfo) -> bool {
     account.as_ref().owner == &crate::system_program::ID
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::{authority_pda, wsol_program, wsol_sa};
+
+    // The ATA derivation carries THREE seeds (wallet, token program, mint).
+    // Pinned against the checked-in wsol_sa constant so the two-seed derive
+    // that silently produced an unusable address cannot come back.
+    #[test]
+    pub fn test_associated_token_address_matches_wsol_sa() {
+        assert_eq!(
+            associated_token_address(
+                &authority_pda::ID,
+                &wsol_program::ID,
+                &anchor_spl::token::Token::id()
+            ),
+            wsol_sa::ID
+        );
+    }
+
+    // The v2 hop0-final forward used to read the lamports delta (always 0
+    // for a token movement); pin the SPL base-layout offset the replacement
+    // relies on.
+    #[test]
+    pub fn test_token_account_amount_reads_spl_layout() {
+        let key = Pubkey::new_unique();
+        let owner = anchor_spl::token::Token::id();
+        let mut lamports = 0u64;
+        let mut data = [0u8; 165];
+        data[64..72].copy_from_slice(&1_234_567u64.to_le_bytes());
+        let mut binding = &mut data[..];
+        let ai = AccountInfo::new(
+            &key,
+            false,
+            true,
+            &mut lamports,
+            &mut binding,
+            &owner,
+            false,
+            0,
+        );
+        assert_eq!(token_account_amount(&ai).unwrap(), 1_234_567);
+    }
 }

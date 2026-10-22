@@ -3,7 +3,10 @@ use super::common::{
     DexProcessor,
 };
 use crate::error::ErrorCode;
-use crate::utils::{close_token_account, sync_wsol_account, transfer_sol};
+use crate::utils::{
+    associated_token_address, close_token_account, require_token_program, sync_wsol_account,
+    token_account_amount, transfer_sol,
+};
 use crate::{
     HopAccounts, BUY_EXACT_SOL_IN_SELECTOR, PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR,
     PUMPFUN_FUND_HEADROOM, PUMPFUN_SELL_V2_SELECTOR, PUMPFUN_SELL_SELECTOR,
@@ -227,6 +230,9 @@ impl DexProcessor for PumpfunBuyProcessor {
                 account_infos.get(5).unwrap().key(), // swap_destination_token
             ],
         )?;
+        // the close program id is caller-supplied and gets a PDA signature:
+        // pin it to the two token programs before the CPI
+        require_token_program(src_token_program)?;
         close_token_account(
             source_token_account.to_account_info(),
             authority.to_account_info(),
@@ -441,6 +447,18 @@ fn buy_with_layout<'a>(
 
     let instruction =
         Instruction { program_id: swap_accounts.dex_program_id.key(), accounts, data };
+
+    // hop0: pump's `user` slot is the authority PDA, so the CPI spends
+    // `amount_in` out of the PDA's own lamports — the temp is what is
+    // supposed to fund it. Without this check an empty (but valid) temp
+    // would quietly turn the authority's standing SOL into this route's
+    // funding, and the rent refund below would read 0.
+    if hop == 0 {
+        require!(
+            swap_accounts.swap_source_token.to_account_info().lamports() >= amount_in,
+            ErrorCode::InvalidSourceTokenAccount
+        );
+    }
 
     // the rent advanced for the disposable temp (its lamports minus the
     // wrapped input this leg spends); the after-hook refunds it in full to
@@ -809,12 +827,13 @@ pub struct PumpfunV2Processor {
     pub fwd_mint_idx: usize,
     pub fwd_prog_idx: usize,
     pub is_buy: bool,
-    /// pre-CPI lamports of the forward-from account: token movements move
-    /// lamports 1:1, so the forwardable delta is the lamports delta — the
-    /// persistent canonical quote ATA may carry unrelated balance and only
-    /// the delta may ever be forwarded. BPF is single-threaded, interior
-    /// mutability is fine.
-    pre_dst: std::cell::Cell<u64>,
+    /// pre-CPI TOKEN BALANCE of the forward-from account. A token movement
+    /// does not move lamports (only a native/wSOL account's lamports track
+    /// its balance), so the forwardable delta must be read from the SPL
+    /// `amount` — the persistent canonical quote ATA may carry unrelated
+    /// balance and only the delta may ever be forwarded. BPF is
+    /// single-threaded, interior mutability is fine.
+    pre_dst_amount: std::cell::Cell<u64>,
 }
 
 impl DexProcessor for PumpfunV2Processor {
@@ -836,8 +855,8 @@ impl DexProcessor for PumpfunV2Processor {
                     ErrorCode::InsufficientFunds
                 );
             }
-            self.pre_dst
-                .set(account_infos.get(self.dst_idx).unwrap().lamports());
+            self.pre_dst_amount
+                .set(token_account_amount(account_infos.get(self.dst_idx).unwrap())?);
         }
         Ok(before_authority_lamports)
     }
@@ -865,12 +884,24 @@ impl DexProcessor for PumpfunV2Processor {
         let user_edge = account_infos.get(account_infos.len() - 2).unwrap();
         if user_edge.key() != pumpfun_program::ID {
             let from = account_infos.get(self.dst_idx).unwrap();
-            let delta = from
-                .lamports()
-                .checked_sub(self.pre_dst.get())
-                .ok_or(ErrorCode::CalculationError)?;
+            let from_amount = token_account_amount(from)?;
+            // buy: `from` is the payer's own one-shot base temp, so the
+            // WHOLE balance is forwarded — a third party donating tokens to
+            // that address must not brick the close below. sell: `from` is
+            // the shared canonical quote ATA, so only this leg's delta may
+            // ever move (its pre-existing balance belongs to the platform).
+            let delta = if self.is_buy {
+                from_amount
+            } else {
+                from_amount
+                    .checked_sub(self.pre_dst_amount.get())
+                    .ok_or(ErrorCode::CalculationError)?
+            };
             let fwd_mint = account_infos.get(self.fwd_mint_idx).unwrap();
             let fwd_prog = account_infos.get(self.fwd_prog_idx).unwrap();
+            // both program ids are caller-supplied and receive a PDA
+            // signature below — pin them to the token programs
+            require_token_program(fwd_prog)?;
             // decimals sits at byte 44 of both SPL and Token-2022 mints
             let decimals = fwd_mint.try_borrow_data()?[44];
             crate::utils::transfer_token(
@@ -888,6 +919,7 @@ impl DexProcessor for PumpfunV2Processor {
             let temp_idx = if self.is_buy { self.dst_idx } else { self.src_idx };
             let temp = account_infos.get(temp_idx).unwrap();
             let base_prog = account_infos.get(V2_BASE_TOKEN_PROGRAM_IDX).unwrap();
+            require_token_program(base_prog)?;
             close_token_account(
                 temp.to_account_info(),
                 payer.to_account_info(),
@@ -1105,12 +1137,13 @@ pub fn buy_v2<'a>(
     // (real user-edge account) the base output must ride the verifiable
     // one-shot temp — the after-hook closes exactly that account.
     if hop == 0 {
-        let (canonical_quote, _) = Pubkey::find_program_address(
-            &[
-                swap_accounts.swap_authority_pubkey.key.as_ref(),
-                swap_accounts.quote_mint.key.as_ref(),
-            ],
-            &anchor_spl::associated_token::ID,
+        // THREE seeds (wallet, token program, mint): a two-seed derive
+        // yields a different PDA that can never hold a token account, so
+        // the guard would reject every legitimate leg.
+        let canonical_quote = associated_token_address(
+            &swap_accounts.swap_authority_pubkey.key(),
+            &swap_accounts.quote_mint.key(),
+            &swap_accounts.quote_token_program.key(),
         );
         require_keys_eq!(
             swap_accounts.swap_source_token.key(),
@@ -1138,7 +1171,7 @@ pub fn buy_v2<'a>(
             fwd_mint_idx: V2_BASE_MINT_IDX,
             fwd_prog_idx: V2_BASE_TOKEN_PROGRAM_IDX,
             is_buy: true,
-            pre_dst: std::cell::Cell::new(0),
+            pre_dst_amount: std::cell::Cell::new(0),
         },
         &account_infos,
         &mut swap_accounts.swap_source_token,
@@ -1338,7 +1371,7 @@ pub fn sell_v2<'a>(
             fwd_mint_idx: V2_QUOTE_MINT_IDX,
             fwd_prog_idx: V2_QUOTE_TOKEN_PROGRAM_IDX,
             is_buy: false,
-            pre_dst: std::cell::Cell::new(0),
+            pre_dst_amount: std::cell::Cell::new(0),
         },
         &account_infos,
         &mut swap_accounts.swap_source_token,

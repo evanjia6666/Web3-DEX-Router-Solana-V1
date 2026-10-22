@@ -3,7 +3,7 @@ use crate::adapters::common::{
     before_check, before_check_pda_user, enforce_sa_token_allowlist, invoke_process,
 };
 use crate::error::ErrorCode;
-use crate::utils::{close_token_account, transfer_sol};
+use crate::utils::{associated_token_address, close_token_account, transfer_sol};
 use crate::{
     BUY_EXACT_QUOTE_IN_SELECTOR, HopAccounts, PUMPFUN_SELL_SELECTOR, PUMPFUNAMM_FUND_HEADROOM,
     SA_AUTHORITY_SEED, SOL_DIFF_LIMIT, authority_pda, pumpfunamm_program, wsol_sa,
@@ -397,14 +397,14 @@ impl DexProcessor for PumpfunammBuyProcessor {
         }
         // the cashback sink must be exactly the uva's quote-mint ATA (the
         // address pump credits): lock the derivation so a crafted route
-        // cannot point some other PDA-owned account at the slot
+        // cannot point some other PDA-owned account at the slot. THREE
+        // seeds (wallet, token program, mint) — a two-seed derive is a
+        // different PDA that can never hold a token account.
         let sink = account_infos.get(account_infos.len() - 2).unwrap();
         let uva_key = account_infos.get(BUY_USER_VOLUME_ACC_IDX).unwrap().key();
         let quote_mint = account_infos.get(BUY_QUOTE_MINT_IDX).unwrap().key();
-        let (expected_sink, _) = Pubkey::find_program_address(
-            &[uva_key.as_ref(), quote_mint.as_ref()],
-            &anchor_spl::associated_token::ID,
-        );
+        let quote_token_program = account_infos.get(BUY_QUOTE_TOKEN_PROGRAM_IDX).unwrap().key();
+        let expected_sink = associated_token_address(&uva_key, &quote_mint, &quote_token_program);
         require_keys_eq!(sink.key(), expected_sink, ErrorCode::InvalidHopAccounts);
         // defense in depth (the route builder is permissionless): no
         // PDA-owned token account may ride this CPI outside the hop's
