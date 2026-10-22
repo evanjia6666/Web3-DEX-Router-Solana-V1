@@ -1,4 +1,4 @@
-819024
+818920
 # uxuy_router.so @ sbpfv3, platform-tools v1.58 (rustc 1.95.0-dev), HEAD local
 # (P2-2 v2 统一: v2 窗口+user-edge 尾槽、hop0 派生验证、转发+退租 after-hook; +4,848 B vs 814,176)
 # (phase-2 P2-1/P2-3: create_pump_hop0_temp instruction + hop0 source

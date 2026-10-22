@@ -894,6 +894,9 @@ impl DexProcessor for PumpfunV2Processor {
                 "pumpfun v2 hop0-final: forwarded {} to user edge, temp rent returned",
                 delta
             );
+            // the destination is settled: report the forwarded amount so
+            // the adapter-level check skips its (now-zero) balance delta
+            return Ok(delta);
         }
         // settle any surplus back to the payer; a deficit is a
         // first-use rent the authority absorbs by design

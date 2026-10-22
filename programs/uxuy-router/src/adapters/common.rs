@@ -157,8 +157,11 @@ pub fn invoke_process<'info>(
     // execute instruction
     execute_instruction(&instruction, account_infos, proxy_swap, hop, owner_seeds)?;
 
-    // after invoke hook
-    dex_processor.after_invoke(account_infos, hop, owner_seeds, before_sa_authority_lamports)?;
+    // after invoke hook — a non-zero return means the processor settled
+    // the destination itself and reports the settled output amount
+    let settled =
+        dex_processor.after_invoke(account_infos, hop, owner_seeds, before_sa_authority_lamports)?;
+    let dest_settled = if settled > 0 { Some(settled) } else { None };
 
     // post swap check
     post_swap_check(
@@ -170,6 +173,7 @@ pub fn invoke_process<'info>(
         amount_in,
         before_source_balance,
         before_destination_balance,
+        dest_settled,
     )
 }
 
@@ -211,8 +215,11 @@ pub fn invoke_processes<'info>(
         execute_instruction(&instructions[i], account_infos_arr[i], proxy_swap, hop, owner_seeds)?;
     }
 
-    // after invoke hook
-    dex_processor.after_invoke(&account_infos, hop, owner_seeds, before_sa_authority_lamports)?;
+    // after invoke hook — a non-zero return means the processor settled
+    // the destination itself and reports the settled output amount
+    let settled =
+        dex_processor.after_invoke(&account_infos, hop, owner_seeds, before_sa_authority_lamports)?;
+    let dest_settled = if settled > 0 { Some(settled) } else { None };
 
     // post swap check
     post_swap_check(
@@ -224,6 +231,7 @@ pub fn invoke_processes<'info>(
         amount_in,
         before_source_balance,
         before_destination_balance,
+        dest_settled,
     )
 }
 
@@ -264,6 +272,7 @@ fn post_swap_check<'info>(
     amount_in: u64,
     before_source_balance: u64,
     before_destination_balance: u64,
+    dest_settled: Option<u64>,
 ) -> Result<u64> {
     // 1. calculate & check actual amount in
     if swap_source_token.get_lamports() > 0 {
@@ -292,13 +301,25 @@ fn post_swap_check<'info>(
         }
     }
 
-    // 2. calculate & check actual amount out
-    swap_destination_token.reload()?;
-    let after_destination_balance = swap_destination_token.amount;
-    let actual_amount_out = after_destination_balance
-        .checked_sub(before_destination_balance)
-        .ok_or(ErrorCode::CalculationError)?;
-    require!(actual_amount_out > 0, ErrorCode::AmountOutMustBeGreaterThanZero);
+    // 2. calculate & check actual amount out. When the leg's after-hook
+    // already settled the destination itself (the v2 hop0-final forward:
+    // the output left the PDA-side account for the user's edge, so the
+    // adapter-level delta here is 0 or the account is closed), the
+    // processor reports the settled amount and the balance re-read is
+    // skipped — the route-level settlement on the user's edge account is
+    // the binding check.
+    let actual_amount_out = match dest_settled {
+        Some(amount) => amount,
+        None => {
+            swap_destination_token.reload()?;
+            let after_destination_balance = swap_destination_token.amount;
+            let out = after_destination_balance
+                .checked_sub(before_destination_balance)
+                .ok_or(ErrorCode::CalculationError)?;
+            require!(out > 0, ErrorCode::AmountOutMustBeGreaterThanZero);
+            out
+        }
+    };
 
     // 3. update offset & hop accounts
     *offset += accounts_len;
