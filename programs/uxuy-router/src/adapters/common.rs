@@ -308,7 +308,7 @@ fn post_swap_check<'info>(
     Ok(actual_amount_out)
 }
 
-fn enforce_sa_token_allowlist(
+pub fn enforce_sa_token_allowlist(
     account_infos: &[AccountInfo],
     allowed_sa_token_accounts: &[Pubkey],
 ) -> Result<()> {

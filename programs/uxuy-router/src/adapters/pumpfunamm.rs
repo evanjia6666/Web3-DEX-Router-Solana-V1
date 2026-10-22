@@ -1,10 +1,12 @@
 use super::common::DexProcessor;
-use crate::adapters::common::{before_check, before_check_pda_user, invoke_process};
+use crate::adapters::common::{
+    before_check, before_check_pda_user, enforce_sa_token_allowlist, invoke_process,
+};
 use crate::error::ErrorCode;
 use crate::utils::{close_token_account, transfer_sol};
 use crate::{
     BUY_EXACT_QUOTE_IN_SELECTOR, HopAccounts, PUMPFUN_SELL_SELECTOR, PUMPFUNAMM_FUND_HEADROOM,
-    SA_AUTHORITY_SEED, SOL_DIFF_LIMIT, authority_pda, pumpfunamm_program,
+    SA_AUTHORITY_SEED, SOL_DIFF_LIMIT, authority_pda, pumpfunamm_program, wsol_sa,
 };
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::Instruction;
@@ -297,6 +299,7 @@ const BUY_USER_VOLUME_ACC_IDX: usize = 20;
 // hop0 drained-temp close: the quote-side source account and its token
 // program in the processor row (the close needs the program CPI)
 const BUY_SRC_IDX: usize = 6;
+const BUY_DST_IDX: usize = 5;
 const BUY_QUOTE_TOKEN_PROGRAM_IDX: usize = 12;
 
 impl<'info> PumpfunammBuyAccounts3<'info> {
@@ -385,6 +388,16 @@ impl DexProcessor for PumpfunammBuyProcessor {
                 ErrorCode::InsufficientFunds
             );
         }
+        // defense in depth (the route builder is permissionless): no
+        // PDA-owned token account may ride this CPI outside the hop's
+        // declared source/destination slots
+        enforce_sa_token_allowlist(
+            account_infos,
+            &[
+                account_infos.get(BUY_SRC_IDX).unwrap().key(),
+                account_infos.get(BUY_DST_IDX).unwrap().key(),
+            ],
+        )?;
         Ok(before_authority_lamports)
     }
 
@@ -399,10 +412,17 @@ impl DexProcessor for PumpfunammBuyProcessor {
         // hop0: the source is a disposable PDA-owned temp (custody only
         // enters at hop >= 1 — compose guarantees it, same contract as the
         // curve adapter's forced temp); pump has now debited it exactly,
-        // so close it and return the fronted rent to the payer
+        // so close it and return the fronted rent to the payer. The shared
+        // wSOL account is hard-blocked as a belt-and-suspenders guard:
+        // the route builder is permissionless, so per-tx temps are the
+        // only accounts that may ever ride this close.
         if hop == 0 {
-            let payer = account_infos.last().unwrap();
             let source = account_infos.get(BUY_SRC_IDX).unwrap();
+            require!(
+                source.key() != wsol_sa::ID,
+                ErrorCode::InvalidSourceTokenAccount
+            );
+            let payer = account_infos.last().unwrap();
             let quote_token_program = account_infos.get(BUY_QUOTE_TOKEN_PROGRAM_IDX).unwrap();
             close_token_account(
                 source.to_account_info(),
@@ -624,4 +644,24 @@ pub fn buy2<'a>(
     msg!("Dex::Pumpfunamm ABORT");
     require!(true == false, ErrorCode::AdapterAbort);
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The processor-row indexes pin the buy3 account_infos push order
+    // (pool, authority, global_config, base_mint, quote_mint, dst, src,
+    // pool_base, pool_quote, fee_recipient, fee_recipient_ata, base_prog,
+    // quote_prog, system, ata, event, dex, vault_ata, vault_auth, gva,
+    // uva, fee_config, fee_program, [pool_v2], buyback, buyback_ata,
+    // payer-last); pool_v2 inserts at 23 so these all stay stable.
+    #[test]
+    pub fn test_buy3_processor_indexes() {
+        assert_eq!(BUY_AUTHORITY_IDX, 1);
+        assert_eq!(BUY_DST_IDX, 5);
+        assert_eq!(BUY_SRC_IDX, 6);
+        assert_eq!(BUY_QUOTE_TOKEN_PROGRAM_IDX, 12);
+        assert_eq!(BUY_USER_VOLUME_ACC_IDX, 20);
+    }
 }

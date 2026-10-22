@@ -1,4 +1,7 @@
-use super::common::{before_check, before_check_pda_user, invoke_process, DexProcessor};
+use super::common::{
+    before_check, before_check_pda_user, enforce_sa_token_allowlist, invoke_process,
+    DexProcessor,
+};
 use crate::error::ErrorCode;
 use crate::utils::{close_token_account, sync_wsol_account, transfer_sol};
 use crate::{
@@ -205,6 +208,16 @@ impl DexProcessor for PumpfunBuyProcessor {
                 ErrorCode::InsufficientFunds
             );
         }
+        // defense in depth (the route builder is permissionless): no
+        // PDA-owned token account may ride this CPI outside the hop's
+        // declared source/destination slots
+        enforce_sa_token_allowlist(
+            account_infos,
+            &[
+                source_token_account.key(),
+                account_infos.get(5).unwrap().key(), // swap_destination_token
+            ],
+        )?;
         close_token_account(
             source_token_account.to_account_info(),
             authority.to_account_info(),
