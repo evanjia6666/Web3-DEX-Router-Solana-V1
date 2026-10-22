@@ -89,16 +89,37 @@ impl ProxySwapProcessor {
         require_keys_eq!(acc_owner, authority_pda::ID, ErrorCode::InvalidSourceTokenSa);
         require_keys_eq!(acc_mint, source_mint.key(), ErrorCode::InvalidSourceTokenSaMint);
 
+        // The edge source and the PDA-side source must be different
+        // accounts. transfer_token treats from == to as a no-op, so the
+        // same account on both sides would let a permissionless route
+        // spend whatever the PDA-side account already holds (wsol_sa,
+        // custody, a pre-built temp) with zero in-transaction funding.
+        require!(
+            source_token_account.key() != source_token_sa_info.key(),
+            ErrorCode::SourceTokenSaIsSource
+        );
+
+        // ...and the deposit must really land on that account: measure the
+        // credited delta instead of trusting the caller-supplied amount, so
+        // a skipped transfer can never leave the DEX-side spend drawing on
+        // the pre-existing balance.
+        let before_credit = token_account_amount(&source_token_sa_info)?;
+
         transfer_token(
             payer.to_account_info(),
             source_token_account.to_account_info(),
-            source_token_sa_info,
+            source_token_sa_info.clone(),
             source_mint.to_account_info(),
             source_token_program.to_account_info(),
             amount,
             source_mint.decimals,
             owner_seeds,
         )?;
+
+        let credited = token_account_amount(&source_token_sa_info)?
+            .checked_sub(before_credit)
+            .ok_or(ErrorCode::CalculationError)?;
+        require!(credited == amount, ErrorCode::SourceTokenSaNotCredited);
         Ok(())
     }
 

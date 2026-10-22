@@ -257,4 +257,13 @@ pub enum ErrorCode {
     MultiPathNotSupported,
     #[msg("Source token account must be owned by the payer or the router authority")]
     SourceTokenAccountOwner,
+
+    #[msg("source_token_account and source_token_sa must be different accounts")]
+    SourceTokenSaIsSource,
+
+    #[msg("source_token_sa was not credited by this transfer")]
+    SourceTokenSaNotCredited,
+
+    #[msg("Route must contain at least one hop")]
+    EmptyRoute,
 }
