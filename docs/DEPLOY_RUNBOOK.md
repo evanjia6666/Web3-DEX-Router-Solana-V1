@@ -141,3 +141,14 @@ ATA 三 seed、v2 token 差额转发、claim 水位、ToB 退款、空路由/tri
 > 需要 5.811 SOL，付费账户只有 4.646，部署会在 `Account allocation failed` 处失败（buffer 未创建、不扣款）。
 > 带上后 buffer = 617,296 B（4.297 SOL），升级完成后原路退回，实际只花手续费 ~0.0068 SOL。
 > ProgramData 容量保持 834,792（不回收），尾部 217,496 B 为零填充。
+
+### gdex 侧（2026-10-22）
+
+- 部署件：`/data/bin/gdex-solana` → `gdex_solana_vf2010e2_2026-10-22`（符号名里的
+  `f2010e2` = gdex `origin/uxuy-router` HEAD，含 `create_pump_hop0_temp` 构造）。
+- 服务 `gdex-master-solana.service` 于 **18:39:54 CST** 重启；启动后持续处理主网区块
+  （日志 `OnSolBlockTxs` 正常），无 panic/ERROR；`/health` 返回 200。
+- 合约升级（18:36 前后）与 gdex 重启（18:39:54）之间的空窗约 3 分钟。
+- **尚未观测到端到端 swap**：`getSignaturesForAddress(router)` 最后一条在 18:24，
+  升级后 5 分钟观察窗内零路由交易（该程序近期日均仅个位数交易）。
+  真正的 wire 兼容性要等第一笔真实成交才能确认。
