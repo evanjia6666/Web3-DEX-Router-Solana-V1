@@ -397,6 +397,17 @@ mod tests {
     // extended fee account and brick Token-2022 fee collection.
     #[test]
     pub fn test_associate_convert_token_account_accepts_t2022_shapes() {
+        // one shared builder: AccountInfo borrows its storage, so the caller
+        // owns key/lamports/data and lends them out per shape
+        fn make_account<'a>(
+            key: &'a Pubkey,
+            lamports: &'a mut u64,
+            data: &'a mut [u8],
+            owner: &'a Pubkey,
+        ) -> AccountInfo<'a> {
+            AccountInfo::new(key, false, true, lamports, data, owner, false, 0)
+        }
+
         // plain SPL (165 exact): mint 0..32, owner 32..64, amount 64..72,
         // state byte 108 = Initialized
         {
@@ -406,17 +417,7 @@ mod tests {
             let mut data = vec![0u8; 165];
             data[64..72].copy_from_slice(&1_111u64.to_le_bytes());
             data[108] = AccountState::Initialized as u8;
-            let mut binding = &mut data[..];
-            let ai = AccountInfo::new(
-                &key,
-                false,
-                true,
-                &mut lamports,
-                &mut binding,
-                &owner,
-                false,
-                0,
-            );
+            let ai = make_account(&key, &mut lamports, data.as_mut_slice(), &owner);
             assert_eq!(associate_convert_token_account(&ai).unwrap().amount, 1_111);
         }
 
@@ -428,17 +429,7 @@ mod tests {
             let mut data = vec![0u8; 165];
             data[64..72].copy_from_slice(&2_222u64.to_le_bytes());
             data[108] = AccountState::Initialized as u8;
-            let mut binding = &mut data[..];
-            let ai = AccountInfo::new(
-                &key,
-                false,
-                true,
-                &mut lamports,
-                &mut binding,
-                &owner,
-                false,
-                0,
-            );
+            let ai = make_account(&key, &mut lamports, data.as_mut_slice(), &owner);
             assert_eq!(associate_convert_token_account(&ai).unwrap().amount, 2_222);
         }
 
@@ -463,17 +454,7 @@ mod tests {
             let key = Pubkey::new_unique();
             let owner = anchor_spl::token_2022::Token2022::id();
             let mut lamports = 0u64;
-            let mut binding = &mut extended[..];
-            let ai = AccountInfo::new(
-                &key,
-                false,
-                true,
-                &mut lamports,
-                &mut binding,
-                &owner,
-                false,
-                0,
-            );
+            let ai = make_account(&key, &mut lamports, extended.as_mut_slice(), &owner);
             assert_eq!(associate_convert_token_account(&ai).unwrap().amount, 3_333);
         }
     }
