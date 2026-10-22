@@ -8,6 +8,9 @@
 >
 > 部署件大小与 buffer rent：hotfix **598,104 B / 4.164 SOL**；
 > 合并版 **617,296 B / 4.297 SOL**（付费账户现有 4.646 SOL，均放得下）。
+>
+> **已选路线 B（phase-2 全量）。** devnet 已于 2026-10-22 升级到合并版并完成
+> 字节校验（见 §8）；主网待 gdex 同窗口。
 
 ## 0. 结论先行
 
@@ -21,6 +24,7 @@
 | 用途 | 文件 | 字节 | sha256 |
 |---|---|---|---|
 | 线上基线（回滚用） | `target/deploy/rollback/71ee5a9-live-652304.so` | 652,304 | `685fb20bf69406f9d63e5dcfcb353441849f75b338677114402b1c86eb365ec4` |
+| devnet 原字节（devnet 回滚用） | `target/deploy/rollback/devnet-live-848120.so` | 848,120 | `220912f845cb80fb0f3ce8b2efa228eddb7ac23fbd1b295847d167041adb2dfb` |
 | 热修部署件（opt-s，第一版） | `target/deploy/rollback/fafecf4-hotfix-654824.so` | 654,824 | `61be408bc66a5227a723825b397f2effb4f3e61f5c109efffb207210bd2fa26a` |
 | **热修部署件（opt-z，推荐）** | `target/deploy/rollback/optz-hotfix-598104.so` | **598,104** | `aa0cbee7eaed661bdf4a545b85a4d16a83adf7e4de5fa40be4212b13c112dd66` |
 | **合并版部署件（phase-2 + 修复，opt-z）** | `target/deploy/rollback/uxuy-router-optz-617296.so` | **617,296** | `e55bbf657f78c35e05cc4a73237563aa10f14dfc467d5b437f2dbcaea62747a1` |
@@ -101,10 +105,16 @@ solana program deploy target/deploy/rollback/71ee5a9-live-652304.so \
   --keypair <funded-payer> --url mainnet-beta
 ```
 
-**devnet 特殊说明**：devnet 当前链上 ELF（848,120 B，sha256 `220912f8…`）在本机没有
-字节一致的副本（`/tmp/devnet_deployed.so` 同尺寸但哈希不同，属跨机构建差异）。
-升级 devnet 后如需回滚，只能部署 `71ee5a9` 基线（功能等价的 pre-phase-2 版本），
-不能回到"今天 devnet 上那一份"。对测试网可接受，但要在升级前知会 QA。
+**devnet 回滚**：升级前已从链上 dump 原始 ELF 并归档为
+`target/deploy/rollback/devnet-live-848120.so`（sha256 `220912f8…`，校验 MATCH），
+devnet 可直接回滚到升级前那一份：
+
+```bash
+solana program deploy target/deploy/rollback/devnet-live-848120.so \
+  --program-id AN6zjJfTD5Cpj2x56sWsAod1Jb5viiQH4Xcg3tm5DgNY \
+  --upgrade-authority target/deploy/uxuy_devnet_payer-keypair.json \
+  --keypair target/deploy/uxuy_devnet_payer-keypair.json --url devnet
+```
 
 ## 6. 不在本热修范围
 
@@ -118,3 +128,10 @@ ATA 三 seed、v2 token 差额转发、claim 水位、ToB 退款、空路由/tri
   负载前 652,304 B 与 `fafecf4^`（= `71ee5a9`）本机构建产物**逐字节相同**；
   其余 182,488 B 为零填充（历史 `--max-len` 余量，不是"未 strip"）。
 - 构建可复现：`71ee5a9` 与 `fafecf4` 两棵树在本机重建均得到上表哈希。
+
+## 8. 部署记录
+
+| 环境 | 时间 (CST) | 版本 | 部署件 | 字节 | sha256 | 结果 |
+|---|---|---|---|---|---|---|
+| devnet | 2026-10-22 18:1x | `uxuy-router` @ `b37992b` | `uxuy-router-optz-617296.so` | 617,296 | `e55bbf65…47a1` | 已升级，字节校验 MATCH；slot 513,850,011；sig `3hrPnLfV21EL…UTNE`；升级前字节已归档 |
+| mainnet | 待定（与 gdex 同窗口） | 同上 | 同上 | 617,296 | `e55bbf65…47a1` | 待执行 |
