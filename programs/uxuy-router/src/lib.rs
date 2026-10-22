@@ -142,6 +142,20 @@ pub mod uxuy_router {
         instructions::platform_fee_wrap_unwrap_handler_v3_with_receiver(ctx, args)
     }
 
+    pub fn create_pump_hop0_temp<'a>(
+        ctx: Context<'_, '_, 'a, 'a, CreatePumpHop0TempAccounts<'a>>,
+        bump: u8,
+    ) -> Result<()> {
+        instructions::create_pump_hop0_temp_handler(ctx, bump)
+    }
+
+    pub fn sweep_pda_token<'a>(
+        ctx: Context<'_, '_, 'a, 'a, SweepPdaTokenAccounts<'a>>,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::sweep_pda_token_handler(ctx, amount)
+    }
+
     pub fn create_token_account<'a>(
         ctx: Context<'_, '_, 'a, 'a, CreateTokenAccountAccounts<'a>>,
         bump: u8,

@@ -1,5 +1,9 @@
-791648
+814176
 # uxuy_router.so @ sbpfv3, platform-tools v1.58 (rustc 1.95.0-dev), HEAD local
+# (phase-2 P2-1/P2-3: create_pump_hop0_temp instruction + hop0 source
+# verification (PDA ["pump-hop0", payer]) + AMM cashback-sink trailing slot
+# + sweep_pda_token instruction; +22,528 B vs 791,648 — mostly the two new
+# Anchor instruction wrappers).
 # (pump PDA-user unification: hop0 curve/AMM buys ride the authority PDA
 # (before_check_pda_user, AMM hop0 drained-temp close, PDA-seed hop0 CPI,
 # payer-or-PDA source-owner check); +4,856 B vs 785,784). History: 659,760 (old anchor toolchain, de71a19 era) →

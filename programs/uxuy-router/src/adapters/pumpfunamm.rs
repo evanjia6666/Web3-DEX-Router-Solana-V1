@@ -288,8 +288,12 @@ pub struct PumpfunammBuyAccounts3<'info> {
     pub pool_v2: &'info AccountInfo<'info>,
     pub buyback_fee_recipient: &'info AccountInfo<'info>,
     pub buyback_fee_recipient_quote_ata: &'info AccountInfo<'info>,
+    // cashback sink (remaining_accounts on the wire): the uva's
+    // quote-mint ATA — pump accrues cashback into it on buy when valid;
+    // address = ATA(uva, quote_mint) derived Go-side
+    pub user_volume_accumulator_quote_ata: &'info AccountInfo<'info>,
 }
-const BUY_ACCOUNTS_LEN3: usize = 26;
+const BUY_ACCOUNTS_LEN3: usize = 27;
 
 // Fixed indices into the buy adapter's account_infos. pool_v2 is appended
 // after these slots, so both stay stable whether or not the pool carries it;
@@ -331,6 +335,7 @@ impl<'info> PumpfunammBuyAccounts3<'info> {
             pool_v2,
             buyback_fee_recipient,
             buyback_fee_recipient_quote_ata,
+            user_volume_accumulator_quote_ata,
         ]: &[AccountInfo<'info>; BUY_ACCOUNTS_LEN3] =
             array_ref![accounts, offset, BUY_ACCOUNTS_LEN3];
 
@@ -361,6 +366,7 @@ impl<'info> PumpfunammBuyAccounts3<'info> {
             pool_v2,
             buyback_fee_recipient,
             buyback_fee_recipient_quote_ata,
+            user_volume_accumulator_quote_ata,
         })
     }
 }
@@ -396,6 +402,8 @@ impl DexProcessor for PumpfunammBuyProcessor {
             &[
                 account_infos.get(BUY_SRC_IDX).unwrap().key(),
                 account_infos.get(BUY_DST_IDX).unwrap().key(),
+                // the cashback sink rides second-to-last (before payer)
+                account_infos.get(account_infos.len() - 2).unwrap().key(),
             ],
         )?;
         Ok(before_authority_lamports)
@@ -489,6 +497,22 @@ pub fn buy3<'a>(
         hop_accounts,
     )?;
 
+    // hop0: the source must be the verifiable one-shot program temp
+    // (PDA ["pump-hop0", payer]) — a shared custody/wsol_sa account can
+    // never match the derivation, killing the permissionless-route
+    // "custody as source" vector. hop >= 1 keeps custody/temp sources.
+    if hop == 0 {
+        let (expected_temp, _bump) = Pubkey::find_program_address(
+            &[b"pump-hop0", payer.unwrap().key().as_ref()],
+            &crate::ID,
+        );
+        require_keys_eq!(
+            swap_accounts.swap_source_token.key(),
+            expected_temp,
+            ErrorCode::InvalidHopAccounts
+        );
+    }
+
     let mut data = Vec::with_capacity(ARGS_LEN);
     data.extend_from_slice(BUY_EXACT_QUOTE_IN_SELECTOR);
     data.extend_from_slice(&amount_in.to_le_bytes()); // spendable_quote_in
@@ -547,6 +571,12 @@ pub fn buy3<'a>(
     }
     accounts.push(AccountMeta::new_readonly(swap_accounts.buyback_fee_recipient.key(), false));
     accounts.push(AccountMeta::new(swap_accounts.buyback_fee_recipient_quote_ata.key(), false));
+    // trailing remaining-account: the cashback sink (writable — pump
+    // initializes/credits it when valid)
+    accounts.push(AccountMeta::new(
+        swap_accounts.user_volume_accumulator_quote_ata.key(),
+        false,
+    ));
 
     let mut account_infos = arrayvec::ArrayVec::<_, { BUY_ACCOUNTS_LEN3 + 1 }>::new();
     account_infos.push(swap_accounts.pool.to_account_info());
@@ -577,6 +607,7 @@ pub fn buy3<'a>(
     }
     account_infos.push(swap_accounts.buyback_fee_recipient.to_account_info());
     account_infos.push(swap_accounts.buyback_fee_recipient_quote_ata.to_account_info());
+    account_infos.push(swap_accounts.user_volume_accumulator_quote_ata.to_account_info());
     // payer rides last: the after-hook returns the hop0 temp's rent and
     // any surplus to it — see PumpfunammBuyProcessor
     account_infos.push(payer.unwrap().to_account_info());
@@ -663,5 +694,8 @@ mod tests {
         assert_eq!(BUY_SRC_IDX, 6);
         assert_eq!(BUY_QUOTE_TOKEN_PROGRAM_IDX, 12);
         assert_eq!(BUY_USER_VOLUME_ACC_IDX, 20);
+        // window: 4 routing slots + 23 CPI accounts + trailing trio + the
+        // cashback sink; the sink rides second-to-last before the payer
+        assert_eq!(BUY_ACCOUNTS_LEN3, 27);
     }
 }

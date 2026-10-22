@@ -348,6 +348,23 @@ fn buy_with_layout<'a>(
         hop_accounts,
     )?;
 
+    // hop0: the source must be the verifiable one-shot program temp
+    // (PDA ["pump-hop0", payer]) — a shared custody/wsol_sa account can
+    // never match the derivation, killing the permissionless-route
+    // "custody as source" vector. hop >= 1 keeps custody/temp sources:
+    // custody routing through intermediates is the design there.
+    if hop == 0 {
+        let (expected_temp, _bump) = Pubkey::find_program_address(
+            &[b"pump-hop0", payer.unwrap().key().as_ref()],
+            &crate::ID,
+        );
+        require_keys_eq!(
+            swap_accounts.swap_source_token.key(),
+            expected_temp,
+            ErrorCode::InvalidHopAccounts
+        );
+    }
+
     // spendable_sol_in = amount_in (fees inside), min_tokens_out = 1: the
     // route-level min_return bound already protects this leg
     let mut data = Vec::with_capacity(ARGS_LEN);
@@ -1214,6 +1231,15 @@ mod tests {
     // derivation (sha256("global:<ix>")[:8]) so a typo cannot reach the wire.
     #[test]
     pub fn test_selector_derivations() {
+        // the phase-2 helper instructions the Go side hand-builds: pin
+        // their anchor discriminators the same way (a typo cannot reach
+        // the wire)
+        expect_disc(
+            &anchor_lang::solana_program::hash::hash(
+                b"global:create_pump_hop0_temp".as_ref(),
+            ).to_bytes()[..8].try_into().unwrap(),
+            "global:create_pump_hop0_temp",
+        );
         expect_disc(PUMPFUN_SELL_SELECTOR, "global:sell");
         expect_disc(BUY_EXACT_SOL_IN_SELECTOR, "global:buy_exact_sol_in");
         expect_disc(PUMPFUN_BUY_EXACT_QUOTE_IN_V2_SELECTOR, "global:buy_exact_quote_in_v2");
