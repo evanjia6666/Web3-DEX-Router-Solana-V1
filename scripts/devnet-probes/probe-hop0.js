@@ -8,7 +8,7 @@ const {
 } = require("@solana/web3.js");
 const { TOKEN_PROGRAM_ID } = require("@solana/spl-token");
 
-const RPC = "https://api.devnet.solana.com";
+const RPC = process.env.RPC_URL || "https://api.devnet.solana.com";
 const PROGRAM_ID = new PublicKey("AN6zjJfTD5Cpj2x56sWsAod1Jb5viiQH4Xcg3tm5DgNY");
 const AUTHORITY_PDA = new PublicKey("5rvVfdVCgSQ9AyTTctN1MPGk5brWVEtvMfPKtcesAuVG");
 const PUMP = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");

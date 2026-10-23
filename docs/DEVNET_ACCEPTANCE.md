@@ -84,3 +84,16 @@
 | CU 回退候选（opt-s） | `uxuy-router-opts-677416.so` | 677,416 | `cf47d32f6d14256f1b9fd3391a35544e99e8bd158d2d6f299f2222ed9ad05d65` |
 | devnet 回滚 | `devnet-live-848120.so` | 848,120 | `220912f845cb80fb0f3ce8b2efa228eddb7ac23fbd1b295847d167041adb2dfb` |
 | 主网回滚基线 | `71ee5a9-live-652304.so` | 652,304 | `685fb20bf69406f9d63e5dcfcb353441849f75b338677114402b1c86eb365ec4` |
+
+## 7. 2026-10-23 devnet 升级：meteora 位图扩展可写（`5a0b08f`）
+
+- 构建：v1.58 / sbpfv2 / strip，**617,296 B / `da5215e1cb0a0eaf0950f57bd6994945b79595386f9b5a10a871fab5664fa10e`**。
+- 升级 tx `TA6E2qcPbEknQiByr6mGrGSzawvjD9knPPEpwrxCS8GUuJxxoggcEyydt3qLsBegGMjogVSig1AohS7yfpwDB3L`；
+  链上 ProgramData 834,792 B 容量不变（ELF 617,296 + 230,824 零填充），**无需 realloc**。
+- 字节校验：`scripts/verify-onchain-elf.sh` → **MATCH**（对 `da5215e1…`）。
+- 回滚件：`target/deploy/rollback/uxuy-router-optz-617296.so`（`e55bbf65…`，升级前 devnet 字节）。
+- 探针：`probe-guards` 3/3、`probe-hop0` create 1/1 + guards 2/2、`probe-meteora` PASS
+  （细节见 `scripts/devnet-probes/README.md`）。
+- 单测：`cargo test -p uxuy-router` 20/20。
+- 遗留：`ConstraintMut(2000)` 只能在主网池上复现（devnet 的 meteora 构建没有该约束），
+  位图扩展可写标志的主网闭环随 gdex 同窗口验证。

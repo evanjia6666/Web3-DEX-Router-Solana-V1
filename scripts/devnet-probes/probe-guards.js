@@ -11,7 +11,7 @@ const {
   createInitializeMint2Instruction, createInitializeAccount3Instruction,
 } = require("@solana/spl-token");
 
-const RPC = "https://api.devnet.solana.com";
+const RPC = process.env.RPC_URL || "https://api.devnet.solana.com";
 const PROGRAM_ID = new PublicKey("AN6zjJfTD5Cpj2x56sWsAod1Jb5viiQH4Xcg3tm5DgNY");
 const AUTHORITY_PDA = new PublicKey("5rvVfdVCgSQ9AyTTctN1MPGk5brWVEtvMfPKtcesAuVG");
 const ATA_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
