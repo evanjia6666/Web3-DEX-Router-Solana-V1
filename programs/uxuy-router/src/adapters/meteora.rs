@@ -489,7 +489,13 @@ pub fn dlmm_swap<'a>(
 
     let mut accounts = Vec::with_capacity(18);
     accounts.push(AccountMeta::new(swap_accounts.lb_pair.key(), false));
-    accounts.push(AccountMeta::new_readonly(swap_accounts.bin_array_bitmap_extension.key(), false));
+    // meteora declares the (optional) bitmap extension account MUT — the
+    // program writes updated bitmap words during swaps that walk past a word
+    // boundary. A readonly meta dies with anchor ConstraintMut 2000 (live:
+    // Kimchi/SOL pool ENpXvFPb…, 2026-10-23) once the segment passes the
+    // REAL extension PDA; the program-id None marker is unaffected by the
+    // flag (anchor detects None by the key).
+    accounts.push(AccountMeta::new(swap_accounts.bin_array_bitmap_extension.key(), false));
     accounts.push(AccountMeta::new(swap_accounts.reserve_x.key(), false));
     accounts.push(AccountMeta::new(swap_accounts.reserve_y.key(), false));
     accounts.push(AccountMeta::new(swap_source_token, false));
@@ -597,7 +603,13 @@ pub fn dlmm_swap2<'a>(
 
     let mut accounts = Vec::with_capacity(19);
     accounts.push(AccountMeta::new(swap_accounts.lb_pair.key(), false));
-    accounts.push(AccountMeta::new_readonly(swap_accounts.bin_array_bitmap_extension.key(), false));
+    // meteora declares the (optional) bitmap extension account MUT — the
+    // program writes updated bitmap words during swaps that walk past a word
+    // boundary. A readonly meta dies with anchor ConstraintMut 2000 (live:
+    // Kimchi/SOL pool ENpXvFPb…, 2026-10-23) once the segment passes the
+    // REAL extension PDA; the program-id None marker is unaffected by the
+    // flag (anchor detects None by the key).
+    accounts.push(AccountMeta::new(swap_accounts.bin_array_bitmap_extension.key(), false));
     accounts.push(AccountMeta::new(swap_accounts.reserve_x.key(), false));
     accounts.push(AccountMeta::new(swap_accounts.reserve_y.key(), false));
     accounts.push(AccountMeta::new(swap_source_token, false));
