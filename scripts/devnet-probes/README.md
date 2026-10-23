@@ -12,6 +12,7 @@
 | | hop0 pump buy：temp 未转入 `amount_in` | `InvalidSourceTokenAccount` |
 | | hop0 pump buy：custody 当源 | `InvalidHopAccounts` |
 | `probe-meteora.js` | MeteoraDlmmSwap2 19 槽窗口（真实 lb_pair + 真实位图扩展） | 窗口解析通过、CPI 到达 meteora，停在 `reserve_x` 3012 |
+| `sim-dlmm-mainnet.js` | **主网只读模拟**：Kimchi/SOL 池 `ENpXvFPb…` 用 WSOL 买 tokenX | `err=null`，`Dex::MeteoraDlmmSwap2` → meteoras `Swap2` → `SwapEvent` |
 
 ## 跑法
 
@@ -21,6 +22,7 @@ npm install
 node probe-guards.js     # 期望 3/3 passed
 node probe-hop0.js       # 期望 create:1/1, guards:2/2
 node probe-meteora.js    # 期望 PASS（stop code 3012）
+node sim-dlmm-mainnet.js # 主网模拟（不发交易），期望 err=null
 ```
 
 - 需要 `target/deploy/uxuy_devnet_payer-keypair.json`（devnet 升级权限 + 付费），
@@ -55,3 +57,17 @@ node probe-meteora.js    # 期望 PASS（stop code 3012）
 - 2026-10-23，devnet 升级到 `da5215e1…`（meteora 位图扩展可写修复，617,296 B，
   升级 tx `TA6E2qcPbEknQiByr6mGrGSzawvjD9knPPEpwrxCS8GUuJxxoggcEyydt3qLsBegGMjogVSig1AohS7yfpwDB3L`）：
   `probe-guards` 3/3、`probe-hop0` create 1/1 + guards 2/2、`probe-meteora` PASS。
+
+## sim-dlmm-mainnet.js：主网只读模拟（位图扩展可写的闭环证据）
+
+`probe-meteora.js` 证不了可写标志（devnet 的 meteora 没这条约束），主网闭环改用这条：
+
+- 打的是**出过事的那只池子**：Kimchi/SOL `ENpXvFPbJkShkk7UqqXqpEYA9LHpj9Yt4wEofnGNdA9R`
+  （tokenX `CSocnzc…pump` 是 Token-2022，tokenY = WSOL，activeId −774 / binStep 30，
+  位图扩展 `EhsDKsEv…9WZ` 真实存在）。
+- 交易里现造 WSOL ATA + wrap + 目标 ATA，然后 `swap_v3`（`Dex::MeteoraDlmmSwap2`，19 槽窗口），
+  **只 simulate 不发送**，所以不花钱、不改状态。
+- 2026-10-23 主网升级后结果：`err=null`、CU ≈ 120k、
+  `Dex::MeteoraDlmmSwap2 amount_in: 20000000` → meteora `Instruction: Swap2` →
+  `SwapEvent { dex: MeteoraDlmmSwap2, amount_in: 20000000, amount_out: 201994923 }`。
+- 池子地址/账户是硬编码快照；池子状态变了（activeId、bin array）需要重新取。

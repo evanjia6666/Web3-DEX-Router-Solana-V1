@@ -242,3 +242,23 @@ solana program deploy target/deploy/rollback/uxuy-router-optz-617296.so \
 - 回滚件：`target/deploy/rollback/uxuy-router-optz-617296.so`（`e55bbf65…`，升级前字节）。
 - **gdex 尚未更新**（服务器仍是旧包）：当前处于"合约要可写、gdex 传只读"的中间态，
   下一步等 gdex 部署重启（`dex` `origin/uxuy-router` HEAD `dd614cf`，含 `3a0b7a3` 的 `bitmapExt` 可写）。
+
+### 9.8 升级后闭环验证（2026-10-23 17:5x，主网只读模拟）
+
+用 `scripts/devnet-probes/sim-dlmm-mainnet.js` 打**出过事的那只池子** Kimchi/SOL
+`ENpXvFPbJkShkk7UqqXqpEYA9LHpj9Yt4wEofnGNdA9R`（tokenX `CSocnzc…pump` = Token-2022，
+tokenY = WSOL，位图扩展 `EhsDKsEv…9WZ` 真实存在）：
+
+```
+err: null   CU: 120765
+Program log: Dex::MeteoraDlmmSwap2 amount_in: 20000000, offset: 0
+Program log: Instruction: Swap2            (meteora LBUZKhRx…)
+Program log: SwapEvent { dex: MeteoraDlmmSwap2, amount_in: 20000000, amount_out: 202603661 }
+```
+
+0.02 SOL → ~202 token，全程不发送、不花钱。升级前同一条 wire 在这只池子上死在
+`ConstraintMut(2000)`（见 `5a0b08f` 提交信息），现在过约束、CPI 完成、meteora 出
+`SwapEvent` —— 位图扩展可写的闭环成立。
+
+> 注意：这是 `simulateTransaction`，不是成交；真实成交要等第一笔 DLMM 路由流量。
+> 同时 gdex 侧 `dd614cf` 已上线（17:19:39 重启，日志 `dlmm/watch.go` 正常刷 bin）。
