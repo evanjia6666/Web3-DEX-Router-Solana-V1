@@ -136,6 +136,7 @@ ATA 三 seed、v2 token 差额转发、claim 水位、ToB 退款、空路由/tri
 |---|---|---|---|---|---|---|
 | devnet | 2026-10-22 18:1x | `uxuy-router` @ `b37992b` | `uxuy-router-optz-617296.so` | 617,296 | `e55bbf65…47a1` | 已升级，字节校验 MATCH；slot 513,850,011；sig `3hrPnLfV21EL…UTNE`；升级前字节已归档 |
 | mainnet | 2026-10-22 18:3x | 同上 | 同上 | 617,296 | `e55bbf65…47a1` | **已升级**，字节校验 MATCH；slot 460,000,401；sig `2T7TAryMLhXF…mpy` |
+| mainnet | 2026-10-23 17:22 | `uxuy-router` @ `5a0b08f`（meteora 位图扩展可写） | `target/deploy/rollback/uxuy-router-20261023-da5215e1.so` | 617,296 | `da5215e1…a10e` | **已升级**，字节校验 MATCH；slot 460,387,595；sig `4JwGXLFX4dxMpnBLWTFW8ZhFJGDkWYec1HJwFeUjnWTMLC1ZWy3gjXFcfFE1c5YUpAeBjpPuwRw1bYs8bZMkuSYj`；容量仍 834,792；手续费 ~0.0068 SOL；升级后空指令探针 → `InstructionFallbackNotFound`(101)，证明新 ELF 可执行 |
 
 > ⚠️ 主网升级必须带 `--max-len 617296`：不带时 CLI 会按 ProgramData 现有容量（834,792 B）分配 buffer，
 > 需要 5.811 SOL，付费账户只有 4.646，部署会在 `Account allocation failed` 处失败（buffer 未创建、不扣款）。
@@ -229,3 +230,15 @@ solana program deploy target/deploy/rollback/uxuy-router-optz-617296.so \
 - devnet 探针**不能**用于主网（脚本里的账户/密钥都是 devnet 状态）；主网要验的是
   Gdex 侧 DLMM 段：gdex `3a0b7a3` 起 `bitmapExt` 已传 writable，
   `dex` `origin/uxuy-router` HEAD `dd614cf` 含该改动 —— **先合约后 gdex**，同窗口。
+
+### 9.7 执行结果（2026-10-23 17:22 CST，已上主网）
+
+- 升级 tx `4JwGXLFX4dxMpnBLWTFW8ZhFJGDkWYec1HJwFeUjnWTMLC1ZWy3gjXFcfFE1c5YUpAeBjpPuwRw1bYs8bZMkuSYj`，
+  slot **460,387,595**，耗时 1 分 11 秒。
+- 链上字节 == `da5215e1cb0a0eaf0950f57bd6994945b79595386f9b5a10a871fab5664fa10e`（`verify-onchain-elf.sh` **MATCH**），
+  ProgramData 容量保持 834,792（不缩容），尾部 217,496 B 零填充。
+- 付费账户 `uxuy_ops_payer` 4.6390 → **4.6323 SOL**（实际花费 ~0.0068 SOL，buffer 已自动退回）。
+- 活性检查：空指令 `simulateTransaction` → `InstructionFallbackNotFound`(101)，新 ELF 正常执行。
+- 回滚件：`target/deploy/rollback/uxuy-router-optz-617296.so`（`e55bbf65…`，升级前字节）。
+- **gdex 尚未更新**（服务器仍是旧包）：当前处于"合约要可写、gdex 传只读"的中间态，
+  下一步等 gdex 部署重启（`dex` `origin/uxuy-router` HEAD `dd614cf`，含 `3a0b7a3` 的 `bitmapExt` 可写）。
