@@ -162,3 +162,70 @@ ATA 三 seed、v2 token 差额转发、claim 水位、ToB 退款、空路由/tri
 
 钱包净变化 −0.000257 SOL（往返曲线费 ~2.2%）。两笔均 `finalized`、无错误；
 预执行门限（simulate）与实际成交一致。
+
+---
+
+## 9. 2026-10-23 主网升级预演（未动链）
+
+### 9.1 现状与目标
+
+| | 值 |
+|---|---|
+| 程序 | `AN6zjJfTD5Cpj2x56sWsAod1Jb5viiQH4Xcg3tm5DgNY` |
+| 升级权限（链上） | `4jZq7kXH6XA6xCZvnAvL9NPxN4QFDNHdKfw1zDm1hMwg` == `target/deploy/uxuy_upgrade_authority-keypair.json` ✅ |
+| 线上字节 | `e55bbf65…47a1`（617,296 B，slot 460,000,401）— `verify-onchain-elf.sh` **MATCH** |
+| ProgramData 容量 | 834,792 B（尾部 217,496 B 零填充） |
+| 目标字节 | `da5215e1cb0a0eaf0950f57bd6994945b79595386f9b5a10a871fab5664fa10e`（617,296 B，devnet 已验证） |
+| 源码差异 | `b37992b..5a0b08f`：`programs/` 下**只有** meteora 两行（`new_readonly` → `new`），其余为测试/文档/探针 |
+
+### 9.2 预检（均为只读，2026-10-23 17:0x–17:1x 实测）
+
+| 检查 | 结果 |
+|---|---|
+| 线上 == 回滚件 `uxuy-router-optz-617296.so` | ✅ MATCH（回滚件即当前字节，无需另存） |
+| 容量 ≥ 目标 | ✅ 834,792 ≥ 617,296，**不需要 realloc / 不缩容** |
+| buffer 租金（`--max-len 617296`） | 4.2973 SOL |
+| buffer 租金（不带 `--max-len`） | **5.8110 SOL**（按 834,792 分配）→ 必带 `--max-len 617296` |
+| 付费账户 | `uxuy_ops_payer` `HRF4WPP5…S6P` = **4.6390 SOL**（余 0.34 SOL 够手续费） |
+| 备用付费账户 | `uxuy_mainnet_payer` `5uuPqko7…L2Z` = **0 SOL**，不可用 |
+| 声明 program id | `AN6z…`（devnet 同地址部署后探针全过，反证 id 匹配） |
+
+### 9.3 命令（照抄）
+
+```bash
+solana program deploy target/deploy/uxuy-router-devnet-20261023.so \
+  --program-id AN6zjJfTD5Cpj2x56sWsAod1Jb5viiQH4Xcg3tm5DgNY \
+  --upgrade-authority target/deploy/uxuy_upgrade_authority-keypair.json \
+  --keypair target/deploy/uxuy_ops_payer-keypair.json \
+  --max-len 617296 \
+  --url https://solana-mainnet.g.alchemy.com/v2/<key>
+```
+
+> RPC 用 dex 项目 `.env` 里的 Alchemy key（`solana-mainnet` 域名）；公共端点会被限流打断。
+
+### 9.4 预演结果（在 devnet 上用同一条命令形状跑）
+
+- 第一次：`Error: 12 write transactions failed`，程序字节未变（安全失败），残留 buffer
+  `3KRi7wKF…`（3.137 SOL）→ `solana program close 3KRi7wKF…` 回收。
+- 重跑：**47.8 s 成功**，tx `oSdwTVFJ3Q1gr4eRA8wMWi5bMMvT3ATZjf4afzWBHPcmC4uZQCe2xPxwesK2iF23eAPsrpgaereYx2xkK7hMJrp`；
+  字节校验仍 MATCH，ProgramData 容量保持 848,120（不缩容），手续费 ~0.003 SOL。
+- 结论：`--max-len` 小于现有容量是安全的（写 buffer，不动 ProgramData 容量）；
+  写交易可能瞬时失败 → **主网失败后先 `solana program close <buffer>` 回收再重跑**，
+  不要连着重跑（会叠 buffer 占用）。
+
+### 9.5 回滚
+
+```bash
+solana program deploy target/deploy/rollback/uxuy-router-optz-617296.so \
+  --program-id AN6zjJfTD5Cpj2x56sWsAod1Jb5viiQH4Xcg3tm5DgNY \
+  --upgrade-authority target/deploy/uxuy_upgrade_authority-keypair.json \
+  --keypair target/deploy/uxuy_ops_payer-keypair.json \
+  --max-len 617296 --url https://solana-mainnet.g.alchemy.com/v2/<key>
+```
+
+### 9.6 部署后
+
+- `bash scripts/verify-onchain-elf.sh target/deploy/uxuy-router-devnet-20261023.so <mainnet-rpc>` → 期望 MATCH（`da5215e1…`）。
+- devnet 探针**不能**用于主网（脚本里的账户/密钥都是 devnet 状态）；主网要验的是
+  Gdex 侧 DLMM 段：gdex `3a0b7a3` 起 `bitmapExt` 已传 writable，
+  `dex` `origin/uxuy-router` HEAD `dd614cf` 含该改动 —— **先合约后 gdex**，同窗口。
